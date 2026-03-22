@@ -8,6 +8,7 @@ const eventsRouter = require('./routes/events');
 const staffRouter = require('./routes/staff');
 const guestlistRouter = require('./routes/guestlist');
 const checkinRouter = require('./routes/checkin');
+const uploadRouter = require('./routes/upload');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,7 +19,7 @@ app.use(cors({
   origin: process.env.WEB_URL || '*',
   credentials: true,
 }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '6mb' }));
 
 // Health check
 app.get('/health', (req, res) => {
@@ -30,6 +31,7 @@ app.use('/api/events', eventsRouter);
 app.use('/api/events/:slug/staff', staffRouter);
 app.use('/api/events/:slug/guests', guestlistRouter);
 app.use('/api/checkin', checkinRouter);
+app.use('/api/upload', uploadRouter);
 
 // 404
 app.use((req, res) => {
