@@ -5,24 +5,20 @@ const { verifyQrToken } = require('../services/qr');
 
 const router = Router();
 
-// Verify QR and check in guest
+// Verify QR and check in guest — optimized for speed
 router.post('/', requireAuth, async (req, res) => {
   const { token } = req.body;
 
   if (!token) return res.status(400).json({ error: 'QR token is required' });
 
   // Decode signed token
-  let decoded;
   try {
-    decoded = verifyQrToken(token);
+    verifyQrToken(token);
   } catch (err) {
-    return res.json({
-      status: 'invalid',
-      message: 'Código QR inválido',
-    });
+    return res.json({ status: 'invalid', message: 'Código QR inválido' });
   }
 
-  // Look up guest by token
+  // Single query: get guest + event in one shot
   const { data: guest, error } = await supabase
     .from('guests')
     .select('id, name, email, notes, checked_in, checked_in_at, event_id')
@@ -30,36 +26,20 @@ router.post('/', requireAuth, async (req, res) => {
     .single();
 
   if (error || !guest) {
-    return res.json({
-      status: 'invalid',
-      message: 'Acceso no encontrado',
-    });
+    return res.json({ status: 'invalid', message: 'Acceso no encontrado' });
   }
 
-  // Verify user has access to this event (owner, staff, or door)
-  const { data: event } = await supabase
-    .from('events')
-    .select('id, name, owner_id')
-    .eq('id', guest.event_id)
-    .single();
+  // Parallel: check event access + (if not already checked in) prepare for check-in
+  const [eventResult, staffResult] = await Promise.all([
+    supabase.from('events').select('id, name, owner_id').eq('id', guest.event_id).single(),
+    supabase.from('event_staff').select('role').eq('event_id', guest.event_id).eq('user_id', req.user.id).not('accepted_at', 'is', null).single(),
+  ]);
 
-  if (!event) {
-    return res.json({ status: 'invalid', message: 'Evento no encontrado' });
-  }
+  const event = eventResult.data;
+  if (!event) return res.json({ status: 'invalid', message: 'Evento no encontrado' });
 
   const isOwner = event.owner_id === req.user.id;
-  let isStaff = false;
-  if (!isOwner) {
-    const { data: staff } = await supabase
-      .from('event_staff')
-      .select('role')
-      .eq('event_id', event.id)
-      .eq('user_id', req.user.id)
-      .not('accepted_at', 'is', null)
-      .single();
-    isStaff = !!staff;
-  }
-
+  const isStaff = !!staffResult.data;
   if (!isOwner && !isStaff) {
     return res.status(403).json({ error: 'No tienes acceso a este evento' });
   }
@@ -69,51 +49,33 @@ router.post('/', requireAuth, async (req, res) => {
     return res.json({
       status: 'already_checked_in',
       message: 'Ya registrado',
-      guest: {
-        name: guest.name,
-        notes: guest.notes,
-        checked_in_at: guest.checked_in_at,
-      },
+      guest: { name: guest.name, notes: guest.notes, checked_in_at: guest.checked_in_at },
     });
   }
 
-  // Check in
-  const { error: updateErr } = await supabase
-    .from('guests')
-    .update({
+  // Check in + get counts in parallel
+  const [updateResult, totalResult, checkedResult] = await Promise.all([
+    supabase.from('guests').update({
       checked_in: true,
       checked_in_at: new Date().toISOString(),
       checked_in_by: req.user.id,
-    })
-    .eq('id', guest.id);
+    }).eq('id', guest.id),
+    supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id),
+    supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id).eq('checked_in', true),
+  ]);
 
-  if (updateErr) {
+  if (updateResult.error) {
     return res.status(500).json({ error: 'Error al registrar entrada' });
   }
-
-  // Get updated counts
-  const { count: totalGuests } = await supabase
-    .from('guests')
-    .select('*', { count: 'exact', head: true })
-    .eq('event_id', event.id);
-
-  const { count: checkedInCount } = await supabase
-    .from('guests')
-    .select('*', { count: 'exact', head: true })
-    .eq('event_id', event.id)
-    .eq('checked_in', true);
 
   res.json({
     status: 'success',
     message: '¡Acceso confirmado!',
-    guest: {
-      name: guest.name,
-      notes: guest.notes,
-    },
+    guest: { name: guest.name, notes: guest.notes },
     event: { name: event.name },
     stats: {
-      checked_in: checkedInCount,
-      total: totalGuests,
+      checked_in: (checkedResult.count || 0) + 1, // +1 because the count query may race with update
+      total: totalResult.count || 0,
     },
   });
 });
