@@ -1,0 +1,78 @@
+const jwt = require('jsonwebtoken');
+const { supabase } = require('../lib/supabase');
+
+/**
+ * Verify Supabase JWT and attach user to request.
+ * Expects: Authorization: Bearer <token>
+ */
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid authorization header' });
+  }
+
+  const token = header.split(' ')[1];
+
+  try {
+    const payload = jwt.verify(token, process.env.SUPABASE_JWT_SECRET);
+    req.user = {
+      id: payload.sub,
+      email: payload.email,
+      role: payload.role,
+    };
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+/**
+ * Check if user is owner or staff for an event.
+ * Requires :slug param in the route and requireAuth before it.
+ * @param {string[]} allowedRoles - e.g. ['owner', 'staff', 'door']
+ */
+function requireEventAccess(allowedRoles = ['owner', 'staff', 'door']) {
+  return async (req, res, next) => {
+    const slug = req.params.slug;
+    const userId = req.user.id;
+
+    // Look up the event
+    const { data: event, error } = await supabase
+      .from('events')
+      .select('id, owner_id')
+      .eq('slug', slug)
+      .single();
+
+    if (error || !event) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+
+    req.event = event;
+
+    // Check if owner
+    if (event.owner_id === userId && allowedRoles.includes('owner')) {
+      req.eventRole = 'owner';
+      return next();
+    }
+
+    // Check if staff
+    if (allowedRoles.some(r => r !== 'owner')) {
+      const { data: staff } = await supabase
+        .from('event_staff')
+        .select('role')
+        .eq('event_id', event.id)
+        .eq('user_id', userId)
+        .not('accepted_at', 'is', null)
+        .single();
+
+      if (staff && allowedRoles.includes(staff.role)) {
+        req.eventRole = staff.role;
+        return next();
+      }
+    }
+
+    return res.status(403).json({ error: 'You do not have access to this event' });
+  };
+}
+
+module.exports = { requireAuth, requireEventAccess };
