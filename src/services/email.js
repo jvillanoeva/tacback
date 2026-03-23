@@ -34,15 +34,24 @@ async function uploadQrImage(qrToken, guestId) {
 }
 
 /**
- * Send a QR code email to a guest.
+ * Send a branded QR code email to a guest.
  */
 async function sendGuestQrEmail({ guest, event }) {
   if (!guest.email) {
     throw new Error('Guest has no email address');
   }
 
-  // Upload QR to storage so it works in all email clients
   const qrUrl = await uploadQrImage(guest.qr_token, guest.id);
+
+  const color = event.brand_color || '#e74c3c';
+  const bannerUrl = event.banner_url || '';
+  const logoUrl = event.logo_url || '';
+  const promoter = event.promoter_name || '';
+
+  // Header: logo image if available, otherwise event name in text
+  const headerHtml = logoUrl
+    ? `<img src="${logoUrl}" alt="${event.name}" style="max-width:280px; max-height:80px; display:block; margin:0 auto;">`
+    : `<h1 style="color:#ffffff; font-size:22px; font-weight:700; margin:0; letter-spacing:1px;">${event.name}</h1>`;
 
   const html = `
 <!DOCTYPE html>
@@ -52,46 +61,50 @@ async function sendGuestQrEmail({ guest, event }) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="margin:0; padding:0; background:#0a0a0a; font-family:'Helvetica Neue',Arial,sans-serif;">
-  <div style="max-width:480px; margin:0 auto; padding:40px 24px;">
+  <div style="max-width:480px; margin:0 auto;">
 
-    <div style="text-align:center; margin-bottom:32px;">
-      <h1 style="color:#ffffff; font-size:14px; letter-spacing:3px; text-transform:uppercase; margin:0;">
-        COLECTIVO
-      </h1>
+    ${bannerUrl ? `
+    <div style="width:100%; overflow:hidden;">
+      <img src="${bannerUrl}" alt="${event.name}" style="width:100%; display:block; object-fit:cover; max-height:240px;">
     </div>
+    ` : ''}
 
-    <div style="background:#111; border:1px solid #222; border-radius:12px; padding:32px; text-align:center;">
+    <div style="padding:32px 24px;">
 
-      <h2 style="color:#fff; font-size:20px; margin:0 0 4px;">
-        ${event.name}
-      </h2>
-      ${event.subtitle ? `<p style="color:#888; font-size:14px; margin:0 0 16px;">${event.subtitle}</p>` : ''}
+      <div style="text-align:center; margin-bottom:24px;">
+        ${headerHtml}
+        ${logoUrl ? `<h2 style="color:#ffffff; font-size:18px; font-weight:600; margin:12px 0 0;">${event.name}</h2>` : ''}
+        ${event.subtitle ? `<p style="color:#999; font-size:14px; margin:4px 0 0;">${event.subtitle}</p>` : ''}
+      </div>
 
-      <div style="color:#aaa; font-size:13px; margin-bottom:24px;">
+      <div style="text-align:center; color:#888; font-size:13px; margin-bottom:24px; line-height:1.6;">
         ${event.date_label || ''}${event.time_label ? ' &middot; ' + event.time_label : ''}<br>
         ${event.venue || ''}${event.city ? ', ' + event.city : ''}
       </div>
 
-      <div style="background:#fff; border-radius:8px; padding:16px; display:inline-block; margin-bottom:24px;">
-        <img src="${qrUrl}" alt="QR Code" width="280" height="280" style="display:block;">
+      <div style="border:1px solid ${color}; border-radius:8px; padding:24px; text-align:center; margin-bottom:24px;">
+        <div style="background:#ffffff; border-radius:6px; padding:16px; display:inline-block; margin-bottom:16px;">
+          <img src="${qrUrl}" alt="QR Code" width="260" height="260" style="display:block;">
+        </div>
+
+        <div style="margin-bottom:8px;">
+          <span style="color:#ffffff; font-size:18px; font-weight:700;">
+            ${guest.name}
+          </span>
+        </div>
+        ${guest.tier ? `<div style="margin-bottom:8px;"><span style="color:${color}; font-size:12px; text-transform:uppercase; letter-spacing:2px; font-weight:600;">${guest.tier}</span></div>` : ''}
+        ${guest.notes ? `<div style="color:#888; font-size:13px;">${guest.notes}</div>` : ''}
       </div>
 
-      <div style="margin-bottom:16px;">
-        <span style="color:#fff; font-size:16px; font-weight:600;">
-          ${guest.name}
-        </span>
-        ${guest.tier ? `<br><span style="color:#e74c3c; font-size:13px; text-transform:uppercase; letter-spacing:1px;">${guest.tier}</span>` : ''}
-        ${guest.notes ? `<br><span style="color:#888; font-size:13px;">${guest.notes}</span>` : ''}
-      </div>
-
-      <p style="color:#666; font-size:12px; margin:0;">
+      <p style="color:#666; font-size:12px; text-align:center; margin:0 0 24px;">
         Presenta este código QR en la entrada
       </p>
-    </div>
 
-    <p style="color:#444; font-size:11px; text-align:center; margin-top:24px;">
-      colectivo.live
-    </p>
+      <div style="border-top:1px solid #222; padding-top:16px; text-align:center;">
+        ${promoter ? `<p style="color:#555; font-size:11px; margin:0 0 4px;">Presentado por ${promoter}</p>` : ''}
+        <p style="color:#333; font-size:10px; margin:0;">Powered by colectivo.live</p>
+      </div>
+    </div>
   </div>
 </body>
 </html>`;
