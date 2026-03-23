@@ -42,9 +42,9 @@ function formatInstructions(text) {
     const trimmed = line.trim();
     if (!trimmed) return '<br>';
     if (trimmed.startsWith('* ') || trimmed.startsWith('- ')) {
-      return `<div style="padding-left:16px; margin:3px 0;">• ${trimmed.slice(2)}</div>`;
+      return `<div style="padding-left:16px; margin:3px 0; font-weight:300;">• ${trimmed.slice(2)}</div>`;
     }
-    return `<div style="margin:6px 0; font-weight:600;">${trimmed}</div>`;
+    return `<div style="margin:8px 0; font-weight:700; font-size:14px; letter-spacing:0.5px;">${trimmed}</div>`;
   }).join('');
 }
 
@@ -87,15 +87,8 @@ async function sendGuestQrEmail({ guest, event }) {
 
     <div style="padding:24px;">
 
-      <!-- QR Code -->
-      <div style="text-align:center; margin-bottom:24px;">
-        <div style="background:#ffffff; border-radius:4px; padding:16px; display:inline-block;">
-          <img src="${qrUrl}" alt="QR Code" width="240" height="240" style="display:block;">
-        </div>
-      </div>
-
       <!-- Guest info -->
-      <div style="text-align:center; margin-bottom:24px;">
+      <div style="text-align:center; margin-bottom:20px;">
         <div style="color:#ffffff; font-size:20px; font-weight:700; letter-spacing:1px; text-transform:uppercase;">
           ${guest.name}
         </div>
@@ -106,7 +99,7 @@ async function sendGuestQrEmail({ guest, event }) {
       <!-- Instructions ES -->
       ${instructionsEs ? `
       <div style="border-top:1px solid #222; padding-top:20px; margin-bottom:20px;">
-        <div style="color:#cccccc; font-size:13px; line-height:1.7;">
+        <div style="color:#cccccc; font-size:13px; line-height:1.7; font-weight:300;">
           ${formatInstructions(instructionsEs)}
         </div>
       </div>
@@ -115,7 +108,7 @@ async function sendGuestQrEmail({ guest, event }) {
       <!-- Instructions EN -->
       ${instructionsEn ? `
       <div style="border-top:1px solid #222; padding-top:20px; margin-bottom:20px;">
-        <div style="color:#888888; font-size:12px; line-height:1.7;">
+        <div style="color:#888888; font-size:12px; line-height:1.7; font-weight:300;">
           ${formatInstructions(instructionsEn)}
         </div>
       </div>
@@ -125,6 +118,13 @@ async function sendGuestQrEmail({ guest, event }) {
         Presenta este código QR en la entrada
       </div>
       `}
+
+      <!-- QR Code -->
+      <div style="text-align:center; margin-bottom:24px;">
+        <div style="background:#ffffff; border-radius:4px; padding:16px; display:inline-block;">
+          <img src="${qrUrl}" alt="QR Code" width="240" height="240" style="display:block;">
+        </div>
+      </div>
 
       <!-- Footer -->
       <div style="border-top:1px solid #1a1a1a; padding-top:16px; text-align:center;">
