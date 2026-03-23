@@ -34,6 +34,21 @@ async function uploadQrImage(qrToken, guestId) {
 }
 
 /**
+ * Convert plain text with * bullets to HTML.
+ */
+function formatInstructions(text) {
+  if (!text) return '';
+  return text.split('\n').map(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return '<br>';
+    if (trimmed.startsWith('* ') || trimmed.startsWith('- ')) {
+      return `<div style="padding-left:16px; margin:3px 0;">• ${trimmed.slice(2)}</div>`;
+    }
+    return `<div style="margin:6px 0; font-weight:600;">${trimmed}</div>`;
+  }).join('');
+}
+
+/**
  * Send a branded QR code email to a guest.
  */
 async function sendGuestQrEmail({ guest, event }) {
@@ -45,13 +60,10 @@ async function sendGuestQrEmail({ guest, event }) {
 
   const color = event.brand_color || '#e74c3c';
   const bannerUrl = event.banner_url || '';
-  const logoUrl = event.logo_url || '';
-  const promoter = event.promoter_name || '';
+  const instructionsEs = event.email_instructions_es || '';
+  const instructionsEn = event.email_instructions_en || '';
 
-  // Header: logo image if available, otherwise event name in text
-  const headerHtml = logoUrl
-    ? `<img src="${logoUrl}" alt="${event.name}" style="max-width:280px; max-height:80px; display:block; margin:0 auto;">`
-    : `<h1 style="color:#ffffff; font-size:22px; font-weight:700; margin:0; letter-spacing:1px;">${event.name}</h1>`;
+  const hasInstructions = instructionsEs || instructionsEn;
 
   const html = `
 <!DOCTYPE html>
@@ -60,49 +72,63 @@ async function sendGuestQrEmail({ guest, event }) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
-<body style="margin:0; padding:0; background:#0a0a0a; font-family:'Helvetica Neue',Arial,sans-serif;">
-  <div style="max-width:480px; margin:0 auto;">
+<body style="margin:0; padding:0; background:#000000; font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <div style="max-width:520px; margin:0 auto; background:#0a0a0a;">
 
     ${bannerUrl ? `
     <div style="width:100%; overflow:hidden;">
-      <img src="${bannerUrl}" alt="${event.name}" style="width:100%; display:block; object-fit:cover; max-height:240px;">
+      <img src="${bannerUrl}" alt="${event.name}" style="width:100%; display:block; object-fit:cover;">
     </div>
-    ` : ''}
+    ` : `
+    <div style="padding:32px 24px 16px; text-align:center;">
+      <h1 style="color:#fff; font-size:24px; margin:0; letter-spacing:1px;">${event.name}</h1>
+    </div>
+    `}
 
-    <div style="padding:32px 24px;">
+    <div style="padding:24px;">
 
+      <!-- QR Code -->
       <div style="text-align:center; margin-bottom:24px;">
-        ${headerHtml}
-        ${logoUrl ? `<h2 style="color:#ffffff; font-size:18px; font-weight:600; margin:12px 0 0;">${event.name}</h2>` : ''}
-        ${event.subtitle ? `<p style="color:#999; font-size:14px; margin:4px 0 0;">${event.subtitle}</p>` : ''}
-      </div>
-
-      <div style="text-align:center; color:#888; font-size:13px; margin-bottom:24px; line-height:1.6;">
-        ${event.date_label || ''}${event.time_label ? ' &middot; ' + event.time_label : ''}<br>
-        ${event.venue || ''}${event.city ? ', ' + event.city : ''}
-      </div>
-
-      <div style="border:1px solid ${color}; border-radius:8px; padding:24px; text-align:center; margin-bottom:24px;">
-        <div style="background:#ffffff; border-radius:6px; padding:16px; display:inline-block; margin-bottom:16px;">
-          <img src="${qrUrl}" alt="QR Code" width="260" height="260" style="display:block;">
+        <div style="background:#ffffff; border-radius:4px; padding:16px; display:inline-block;">
+          <img src="${qrUrl}" alt="QR Code" width="240" height="240" style="display:block;">
         </div>
-
-        <div style="margin-bottom:8px;">
-          <span style="color:#ffffff; font-size:18px; font-weight:700;">
-            ${guest.name}
-          </span>
-        </div>
-        ${guest.tier ? `<div style="margin-bottom:8px;"><span style="color:${color}; font-size:12px; text-transform:uppercase; letter-spacing:2px; font-weight:600;">${guest.tier}</span></div>` : ''}
-        ${guest.notes ? `<div style="color:#888; font-size:13px;">${guest.notes}</div>` : ''}
       </div>
 
-      <p style="color:#666; font-size:12px; text-align:center; margin:0 0 24px;">
+      <!-- Guest info -->
+      <div style="text-align:center; margin-bottom:24px;">
+        <div style="color:#ffffff; font-size:20px; font-weight:700; letter-spacing:1px; text-transform:uppercase;">
+          ${guest.name}
+        </div>
+        ${guest.tier ? `<div style="color:${color}; font-size:12px; text-transform:uppercase; letter-spacing:3px; margin-top:6px; font-weight:700;">${guest.tier}</div>` : ''}
+      </div>
+
+      ${hasInstructions ? `
+      <!-- Instructions ES -->
+      ${instructionsEs ? `
+      <div style="border-top:1px solid #222; padding-top:20px; margin-bottom:20px;">
+        <div style="color:#cccccc; font-size:13px; line-height:1.7;">
+          ${formatInstructions(instructionsEs)}
+        </div>
+      </div>
+      ` : ''}
+
+      <!-- Instructions EN -->
+      ${instructionsEn ? `
+      <div style="border-top:1px solid #222; padding-top:20px; margin-bottom:20px;">
+        <div style="color:#888888; font-size:12px; line-height:1.7;">
+          ${formatInstructions(instructionsEn)}
+        </div>
+      </div>
+      ` : ''}
+      ` : `
+      <div style="text-align:center; color:#666; font-size:13px; margin-bottom:24px;">
         Presenta este código QR en la entrada
-      </p>
+      </div>
+      `}
 
-      <div style="border-top:1px solid #222; padding-top:16px; text-align:center;">
-        ${promoter ? `<p style="color:#555; font-size:11px; margin:0 0 4px;">Presentado por ${promoter}</p>` : ''}
-        <p style="color:#333; font-size:10px; margin:0;">Powered by colectivo.live</p>
+      <!-- Footer -->
+      <div style="border-top:1px solid #1a1a1a; padding-top:16px; text-align:center;">
+        <span style="color:#333; font-size:10px; letter-spacing:2px; text-transform:uppercase;">Powered by colectivo.live</span>
       </div>
     </div>
   </div>

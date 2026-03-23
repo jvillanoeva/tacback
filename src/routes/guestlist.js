@@ -76,7 +76,7 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
     try {
       const { data: event } = await supabase
         .from('events')
-        .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name')
+        .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name, email_instructions_es, email_instructions_en')
         .eq('id', req.event.id)
         .single();
 
@@ -139,7 +139,7 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
   if (send_emails) {
     const { data: event } = await supabase
       .from('events')
-      .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name')
+      .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name, email_instructions_es, email_instructions_en')
       .eq('id', req.event.id)
       .single();
 
@@ -214,7 +214,7 @@ router.post('/:guestId/send-qr', requireAuth, requireEventAccess(['owner', 'staf
 
   const { data: event } = await supabase
     .from('events')
-    .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name')
+    .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name, email_instructions_es, email_instructions_en')
     .eq('id', req.event.id)
     .single();
 
@@ -245,7 +245,7 @@ router.post('/send-all', requireAuth, requireEventAccess(['owner', 'staff']), as
 
   const { data: event } = await supabase
     .from('events')
-    .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name')
+    .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name, email_instructions_es, email_instructions_en')
     .eq('id', req.event.id)
     .single();
 
