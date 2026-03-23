@@ -1,10 +1,36 @@
 const { Resend } = require('resend');
-const { generateQrDataUrl, generateQrBuffer } = require('./qr');
+const { generateQrBuffer } = require('./qr');
+const { supabase } = require('../lib/supabase');
+const crypto = require('crypto');
 
 let resend;
 function getResend() {
   if (!resend) resend = new Resend(process.env.RESEND_API_KEY);
   return resend;
+}
+
+/**
+ * Upload QR PNG to Supabase Storage and return a public URL.
+ */
+async function uploadQrImage(qrToken, guestId) {
+  const buffer = await generateQrBuffer(qrToken);
+  const hash = crypto.randomBytes(4).toString('hex');
+  const path = `qr/${guestId}-${hash}.png`;
+
+  const { error } = await supabase.storage
+    .from('event-images')
+    .upload(path, buffer, {
+      contentType: 'image/png',
+      upsert: true,
+    });
+
+  if (error) throw new Error('QR upload failed: ' + error.message);
+
+  const { data } = supabase.storage
+    .from('event-images')
+    .getPublicUrl(path);
+
+  return data.publicUrl;
 }
 
 /**
@@ -15,11 +41,8 @@ async function sendGuestQrEmail({ guest, event }) {
     throw new Error('Guest has no email address');
   }
 
-  const qrDataUrl = await generateQrDataUrl(guest.qr_token);
-  const qrBuffer = await generateQrBuffer(guest.qr_token);
-
-  // Extract base64 from data URL for inline image
-  const qrBase64 = qrDataUrl.split(',')[1];
+  // Upload QR to storage so it works in all email clients
+  const qrUrl = await uploadQrImage(guest.qr_token, guest.id);
 
   const html = `
 <!DOCTYPE html>
@@ -45,18 +68,19 @@ async function sendGuestQrEmail({ guest, event }) {
       ${event.subtitle ? `<p style="color:#888; font-size:14px; margin:0 0 16px;">${event.subtitle}</p>` : ''}
 
       <div style="color:#aaa; font-size:13px; margin-bottom:24px;">
-        ${event.date_label || ''}${event.time_label ? ' · ' + event.time_label : ''}<br>
+        ${event.date_label || ''}${event.time_label ? ' &middot; ' + event.time_label : ''}<br>
         ${event.venue || ''}${event.city ? ', ' + event.city : ''}
       </div>
 
       <div style="background:#fff; border-radius:8px; padding:16px; display:inline-block; margin-bottom:24px;">
-        <img src="cid:qrcode" alt="QR Code" width="280" height="280" style="display:block;">
+        <img src="${qrUrl}" alt="QR Code" width="280" height="280" style="display:block;">
       </div>
 
       <div style="margin-bottom:16px;">
         <span style="color:#fff; font-size:16px; font-weight:600;">
           ${guest.name}
         </span>
+        ${guest.tier ? `<br><span style="color:#e74c3c; font-size:13px; text-transform:uppercase; letter-spacing:1px;">${guest.tier}</span>` : ''}
         ${guest.notes ? `<br><span style="color:#888; font-size:13px;">${guest.notes}</span>` : ''}
       </div>
 
@@ -77,14 +101,6 @@ async function sendGuestQrEmail({ guest, event }) {
     to: guest.email,
     subject: `🎟️ Acceso — ${event.name}`,
     html,
-    attachments: [
-      {
-        filename: 'qr-code.png',
-        content: qrBuffer,
-        contentType: 'image/png',
-        cid: 'qrcode',
-      },
-    ],
   });
 
   if (error) throw error;

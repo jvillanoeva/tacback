@@ -80,4 +80,50 @@ router.post('/', requireAuth, async (req, res) => {
   });
 });
 
+// Manual check-in by guest ID (no QR needed)
+router.post('/manual', requireAuth, async (req, res) => {
+  const { guest_id } = req.body;
+  if (!guest_id) return res.status(400).json({ error: 'guest_id is required' });
+
+  const { data: guest, error: gErr } = await supabase
+    .from('guests')
+    .select('id, name, notes, checked_in, event_id')
+    .eq('id', guest_id)
+    .single();
+
+  if (gErr || !guest) return res.status(404).json({ error: 'Guest not found' });
+
+  // Verify access
+  const [eventResult, staffResult] = await Promise.all([
+    supabase.from('events').select('id, owner_id').eq('id', guest.event_id).single(),
+    supabase.from('event_staff').select('role').eq('event_id', guest.event_id).eq('user_id', req.user.id).not('accepted_at', 'is', null).single(),
+  ]);
+
+  const event = eventResult.data;
+  if (!event) return res.status(404).json({ error: 'Event not found' });
+
+  const isOwner = event.owner_id === req.user.id;
+  const isStaff = !!staffResult.data;
+  if (!isOwner && !isStaff) {
+    return res.status(403).json({ error: 'No access' });
+  }
+
+  if (guest.checked_in) {
+    return res.json({ status: 'already_checked_in', message: 'Ya registrado' });
+  }
+
+  const { error: uErr } = await supabase
+    .from('guests')
+    .update({
+      checked_in: true,
+      checked_in_at: new Date().toISOString(),
+      checked_in_by: req.user.id,
+    })
+    .eq('id', guest.id);
+
+  if (uErr) return res.status(500).json({ error: 'Check-in failed' });
+
+  res.json({ status: 'success', message: '¡Entrada registrada!', guest: { name: guest.name } });
+});
+
 module.exports = router;
