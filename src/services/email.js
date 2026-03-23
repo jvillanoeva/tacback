@@ -146,4 +146,58 @@ async function sendGuestQrEmail({ guest, event }) {
   return data;
 }
 
-module.exports = { sendGuestQrEmail };
+/**
+ * Send a staff invitation email.
+ */
+async function sendStaffInviteEmail({ email, role, eventName, eventSlug, hasAccount }) {
+  const webUrl = process.env.WEB_URL || 'https://www.colectivo.live';
+  const roleLabel = role === 'door' ? 'Puerta' : 'Staff';
+  const loginUrl = hasAccount
+    ? `${webUrl}/login.html`
+    : `${webUrl}/login.html`;
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0; padding:0; background:#000; font-family:'Helvetica Neue',Arial,sans-serif;">
+  <div style="max-width:480px; margin:0 auto; padding:40px 24px;">
+    <div style="text-align:center; margin-bottom:24px;">
+      <h1 style="color:#fff; font-size:14px; letter-spacing:3px; text-transform:uppercase; margin:0;">COLECTIVO</h1>
+    </div>
+    <div style="background:#0a0a0a; border:1px solid #222; padding:32px; text-align:center;">
+      <h2 style="color:#fff; font-size:18px; font-weight:700; margin:0 0 8px;">Te han invitado como ${roleLabel}</h2>
+      <p style="color:#888; font-size:14px; margin:0 0 24px;">${eventName}</p>
+
+      <div style="text-align:left; color:#ccc; font-size:13px; line-height:1.7; font-weight:300; margin-bottom:24px;">
+        ${role === 'door'
+          ? `<p>Podrás ver la lista de invitados y escanear códigos QR en la entrada.</p>`
+          : `<p>Podrás ver la lista de invitados, agregar personas y escanear códigos QR.</p>`
+        }
+      </div>
+
+      ${!hasAccount ? `
+      <p style="color:#e74c3c; font-size:12px; margin-bottom:16px;">Necesitas crear una cuenta con este email (${email}) para acceder.</p>
+      ` : ''}
+
+      <a href="${loginUrl}" style="display:inline-block; background:#e74c3c; color:#fff; text-decoration:none; padding:12px 32px; font-size:14px; font-weight:600; letter-spacing:1px; text-transform:uppercase;">
+        ${hasAccount ? 'Ir a Colectivo' : 'Crear cuenta'}
+      </a>
+    </div>
+    <p style="color:#333; font-size:10px; text-align:center; margin-top:24px; letter-spacing:2px; text-transform:uppercase;">Powered by colectivo.live</p>
+  </div>
+</body>
+</html>`;
+
+  const { data, error } = await getResend().emails.send({
+    from: process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@colectivo.live>',
+    to: email,
+    subject: `🔑 Invitación — ${eventName}`,
+    html,
+  });
+
+  if (error) throw error;
+  return data;
+}
+
+module.exports = { sendGuestQrEmail, sendStaffInviteEmail };

@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const { supabase } = require('../lib/supabase');
 const { requireAuth, requireEventAccess } = require('../middleware/auth');
+const { sendStaffInviteEmail } = require('../services/email');
 
 const router = Router({ mergeParams: true });
 
@@ -48,6 +49,25 @@ router.post('/', requireAuth, requireEventAccess(['owner']), async (req, res) =>
       return res.status(409).json({ error: 'This person is already staff on this event' });
     }
     return res.status(500).json({ error: error.message });
+  }
+
+  // Send invitation email
+  try {
+    const { data: event } = await supabase
+      .from('events')
+      .select('name, slug')
+      .eq('id', req.event.id)
+      .single();
+
+    await sendStaffInviteEmail({
+      email: email.toLowerCase(),
+      role,
+      eventName: event.name,
+      eventSlug: event.slug,
+      hasAccount: !!existingUser,
+    });
+  } catch (emailErr) {
+    console.error('Staff invite email failed:', emailErr.message);
   }
 
   res.status(201).json(data);

@@ -27,6 +27,16 @@ async function requireAuth(req, res, next) {
       email: user.email,
       role: user.role,
     };
+
+    // Auto-accept pending staff invites for this user's email
+    supabase
+      .from('event_staff')
+      .update({ user_id: user.id, accepted_at: new Date().toISOString() })
+      .eq('email', user.email.toLowerCase())
+      .is('user_id', null)
+      .then(() => {})
+      .catch(() => {});
+
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
