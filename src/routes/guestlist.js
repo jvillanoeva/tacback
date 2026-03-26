@@ -37,14 +37,17 @@ router.get('/', requireAuth, requireEventAccess(['owner', 'staff', 'door']), asy
   });
 });
 
-// Add single guest (owner or staff)
+// Add single guest (owner or staff) — supports +N extras
 router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
-  const { name, email, phone, notes, tier, send_email } = req.body;
+  const { name, email, phone, notes, tier, send_email, plus } = req.body;
+  const plusN = Math.min(parseInt(plus) || 0, 20);
 
   if (!name) return res.status(400).json({ error: 'Guest name is required' });
 
-  const qrToken = createQrToken(undefined, req.event.id);
+  // Generate a group ID if there are extras
+  const groupId = plusN > 0 ? require('crypto').randomUUID() : null;
 
+  // Insert primary guest
   const { data: guest, error } = await supabase
     .from('guests')
     .insert({
@@ -55,7 +58,8 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
       notes: notes || null,
       tier: tier || null,
       added_by: req.user.id,
-      qr_token: qrToken,
+      qr_token: createQrToken(undefined, req.event.id),
+      group_id: groupId,
     })
     .select()
     .single();
@@ -68,10 +72,46 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
     .from('guests')
     .update({ qr_token: finalToken })
     .eq('id', guest.id);
-
   guest.qr_token = finalToken;
 
-  // Send email if requested and email exists
+  // Insert +N extras with same group_id
+  const extras = [];
+  for (let i = 1; i <= plusN; i++) {
+    const extraRow = {
+      event_id: req.event.id,
+      name: `${name} (+${i})`,
+      email: null,
+      phone: null,
+      notes: `Acceso extra de ${name}`,
+      tier: tier || null,
+      added_by: req.user.id,
+      qr_token: createQrToken(`extra-${i}-${Date.now()}`, req.event.id),
+      group_id: groupId,
+    };
+    extras.push(extraRow);
+  }
+
+  let insertedExtras = [];
+  if (extras.length > 0) {
+    const { data: extData, error: extErr } = await supabase
+      .from('guests')
+      .insert(extras)
+      .select();
+
+    if (extErr) {
+      console.error('Error inserting extras:', extErr.message);
+    } else {
+      insertedExtras = extData;
+      // Update QR tokens with real IDs
+      for (const ext of insertedExtras) {
+        const extToken = createQrToken(ext.id, req.event.id);
+        await supabase.from('guests').update({ qr_token: extToken }).eq('id', ext.id);
+        ext.qr_token = extToken;
+      }
+    }
+  }
+
+  // Send email with ALL QR codes (primary + extras)
   if (send_email && guest.email) {
     try {
       const { data: event } = await supabase
@@ -80,7 +120,8 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
         .eq('id', req.event.id)
         .single();
 
-      await sendGuestQrEmail({ guest, event });
+      const allGuests = [guest, ...insertedExtras];
+      await sendGuestQrEmail({ guest, event, extraGuests: insertedExtras });
       await supabase
         .from('guests')
         .update({ email_sent: true })
@@ -88,7 +129,6 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
       guest.email_sent = true;
     } catch (emailErr) {
       console.error('Email send failed:', emailErr.message);
-      // Don't fail the whole request
     }
   }
 
@@ -107,20 +147,52 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
     return res.status(400).json({ error: 'Maximum 500 guests per batch' });
   }
 
-  const rows = guestList.map(g => ({
-    event_id: req.event.id,
-    name: g.name,
-    email: g.email || null,
-    phone: g.phone || null,
-    notes: g.notes || null,
-    tier: g.tier || null,
-    added_by: req.user.id,
-    qr_token: createQrToken(g.name + Date.now(), req.event.id), // temp token
-  }));
+  // Build all rows including +N extras
+  const allRows = [];
+  const groupMap = []; // track which primary index maps to which extras
+
+  for (let i = 0; i < guestList.length; i++) {
+    const g = guestList[i];
+    const plusN = Math.min(parseInt(g.plus) || 0, 20);
+    const groupId = plusN > 0 ? require('crypto').randomUUID() : null;
+
+    allRows.push({
+      event_id: req.event.id,
+      name: g.name,
+      email: g.email || null,
+      phone: g.phone || null,
+      notes: g.notes || null,
+      tier: g.tier || null,
+      added_by: req.user.id,
+      qr_token: createQrToken(g.name + Date.now() + i, req.event.id),
+      group_id: groupId,
+      _isPrimary: true,
+      _groupId: groupId,
+    });
+
+    for (let j = 1; j <= plusN; j++) {
+      allRows.push({
+        event_id: req.event.id,
+        name: `${g.name} (+${j})`,
+        email: null,
+        phone: null,
+        notes: `Acceso extra de ${g.name}`,
+        tier: g.tier || null,
+        added_by: req.user.id,
+        qr_token: createQrToken(`extra-${i}-${j}-${Date.now()}`, req.event.id),
+        group_id: groupId,
+        _isPrimary: false,
+        _groupId: groupId,
+      });
+    }
+  }
+
+  // Strip internal fields before insert
+  const dbRows = allRows.map(({ _isPrimary, _groupId, ...row }) => row);
 
   const { data: inserted, error } = await supabase
     .from('guests')
-    .insert(rows)
+    .insert(dbRows)
     .select();
 
   if (error) return res.status(500).json({ error: error.message });
@@ -132,9 +204,10 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
       .from('guests')
       .update({ qr_token: finalToken })
       .eq('id', guest.id);
+    guest.qr_token = finalToken;
   }
 
-  // Send emails if requested
+  // Send emails if requested — group extras with their primary
   let emailsSent = 0;
   if (send_emails) {
     const { data: event } = await supabase
@@ -146,8 +219,12 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
     for (const guest of inserted) {
       if (guest.email) {
         try {
-          guest.qr_token = createQrToken(guest.id, req.event.id);
-          await sendGuestQrEmail({ guest, event });
+          // Find extras in same group
+          const extraGuests = guest.group_id
+            ? inserted.filter(g => g.group_id === guest.group_id && g.id !== guest.id)
+            : [];
+
+          await sendGuestQrEmail({ guest, event, extraGuests });
           await supabase
             .from('guests')
             .update({ email_sent: true })
@@ -219,7 +296,18 @@ router.post('/:guestId/send-qr', requireAuth, requireEventAccess(['owner', 'staf
     .single();
 
   try {
-    await sendGuestQrEmail({ guest, event });
+    // Find extras in same group
+    let extraGuests = [];
+    if (guest.group_id) {
+      const { data: extras } = await supabase
+        .from('guests')
+        .select('*')
+        .eq('group_id', guest.group_id)
+        .neq('id', guest.id);
+      extraGuests = extras || [];
+    }
+
+    await sendGuestQrEmail({ guest, event, extraGuests });
     await supabase
       .from('guests')
       .update({ email_sent: true })
@@ -243,6 +331,12 @@ router.post('/send-all', requireAuth, requireEventAccess(['owner', 'staff']), as
     return res.json({ sent: 0, message: 'All guests have already been sent their QR' });
   }
 
+  // Fetch all guests for group lookups
+  const { data: allEventGuests } = await supabase
+    .from('guests')
+    .select('*')
+    .eq('event_id', req.event.id);
+
   const { data: event } = await supabase
     .from('events')
     .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name, email_instructions_es, email_instructions_en')
@@ -252,7 +346,11 @@ router.post('/send-all', requireAuth, requireEventAccess(['owner', 'staff']), as
   let sent = 0;
   for (const guest of guests) {
     try {
-      await sendGuestQrEmail({ guest, event });
+      const extraGuests = guest.group_id
+        ? (allEventGuests || []).filter(g => g.group_id === guest.group_id && g.id !== guest.id)
+        : [];
+
+      await sendGuestQrEmail({ guest, event, extraGuests });
       await supabase
         .from('guests')
         .update({ email_sent: true })

@@ -51,19 +51,40 @@ function formatInstructions(text) {
 /**
  * Send a branded QR code email to a guest.
  */
-async function sendGuestQrEmail({ guest, event }) {
+async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
   if (!guest.email) {
     throw new Error('Guest has no email address');
   }
 
+  // Upload QR for primary guest
   const qrUrl = await uploadQrImage(guest.qr_token, guest.id);
 
+  // Upload QRs for extras
+  const extraQrs = [];
+  for (const ext of extraGuests) {
+    const extQrUrl = await uploadQrImage(ext.qr_token, ext.id);
+    extraQrs.push({ name: ext.name, url: extQrUrl });
+  }
+
+  const totalAccess = 1 + extraGuests.length;
   const color = event.brand_color || '#e74c3c';
   const bannerUrl = event.banner_url || '';
   const instructionsEs = event.email_instructions_es || '';
   const instructionsEn = event.email_instructions_en || '';
 
   const hasInstructions = instructionsEs || instructionsEn;
+
+  // Build extra QR blocks
+  const extraQrHtml = extraQrs.map((eq, i) => `
+      <div style="text-align:center; margin-bottom:16px;">
+        <div style="color:#888; font-size:11px; text-transform:uppercase; letter-spacing:2px; margin-bottom:8px;">
+          Acceso ${i + 2} de ${totalAccess}
+        </div>
+        <div style="background:#ffffff; border-radius:4px; padding:12px; display:inline-block;">
+          <img src="${eq.url}" alt="QR +${i + 1}" width="200" height="200" style="display:block;">
+        </div>
+      </div>
+  `).join('');
 
   const html = `
 <!DOCTYPE html>
@@ -93,6 +114,7 @@ async function sendGuestQrEmail({ guest, event }) {
           ${guest.name}
         </div>
         ${guest.tier ? `<div style="color:${color}; font-size:12px; text-transform:uppercase; letter-spacing:3px; margin-top:6px; font-weight:700;">${guest.tier}</div>` : ''}
+        ${totalAccess > 1 ? `<div style="color:#666; font-size:11px; margin-top:8px; text-transform:uppercase; letter-spacing:2px;">${totalAccess} accesos</div>` : ''}
       </div>
 
       ${hasInstructions ? `
@@ -115,16 +137,20 @@ async function sendGuestQrEmail({ guest, event }) {
       ` : ''}
       ` : `
       <div style="text-align:center; color:#666; font-size:13px; margin-bottom:24px;">
-        Presenta este código QR en la entrada
+        Presenta ${totalAccess > 1 ? 'estos códigos QR' : 'este código QR'} en la entrada
       </div>
       `}
 
-      <!-- QR Code -->
-      <div style="text-align:center; margin-bottom:24px;">
+      <!-- Primary QR Code -->
+      <div style="text-align:center; margin-bottom:${extraQrs.length > 0 ? '16' : '24'}px;">
+        ${totalAccess > 1 ? `<div style="color:#888; font-size:11px; text-transform:uppercase; letter-spacing:2px; margin-bottom:8px;">Acceso 1 de ${totalAccess}</div>` : ''}
         <div style="background:#ffffff; border-radius:4px; padding:16px; display:inline-block;">
           <img src="${qrUrl}" alt="QR Code" width="240" height="240" style="display:block;">
         </div>
       </div>
+
+      <!-- Extra QR Codes -->
+      ${extraQrHtml}
 
       <!-- Footer -->
       <div style="border-top:1px solid #1a1a1a; padding-top:16px; text-align:center;">
