@@ -21,7 +21,7 @@ router.post('/', requireAuth, async (req, res) => {
   // Single query: get guest + event in one shot
   const { data: guest, error } = await supabase
     .from('guests')
-    .select('id, name, email, notes, checked_in, checked_in_at, event_id')
+    .select('id, name, email, notes, tier, checked_in, checked_in_at, event_id')
     .eq('qr_token', token)
     .single();
 
@@ -49,7 +49,7 @@ router.post('/', requireAuth, async (req, res) => {
     return res.json({
       status: 'already_checked_in',
       message: 'Ya registrado',
-      guest: { name: guest.name, notes: guest.notes, checked_in_at: guest.checked_in_at },
+      guest: { name: guest.name, tier: guest.tier, notes: guest.notes, checked_in_at: guest.checked_in_at },
     });
   }
 
@@ -71,7 +71,7 @@ router.post('/', requireAuth, async (req, res) => {
   res.json({
     status: 'success',
     message: '¡Acceso confirmado!',
-    guest: { name: guest.name, notes: guest.notes },
+    guest: { name: guest.name, tier: guest.tier, notes: guest.notes },
     event: { name: event.name },
     stats: {
       checked_in: (checkedResult.count || 0) + 1, // +1 because the count query may race with update
