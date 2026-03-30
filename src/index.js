@@ -9,6 +9,7 @@ const staffRouter = require('./routes/staff');
 const guestlistRouter = require('./routes/guestlist');
 const checkinRouter = require('./routes/checkin');
 const uploadRouter = require('./routes/upload');
+const reportRouter = require('./routes/report');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,6 +33,7 @@ app.use('/api/events/:slug/staff', staffRouter);
 app.use('/api/events/:slug/guests', guestlistRouter);
 app.use('/api/checkin', checkinRouter);
 app.use('/api/upload', uploadRouter);
+app.use('/api/events/:slug/report', reportRouter);
 
 // 404
 app.use((req, res) => {
