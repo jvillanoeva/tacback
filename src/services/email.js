@@ -34,17 +34,17 @@ async function uploadQrImage(qrToken, guestId) {
 }
 
 /**
- * Convert plain text with * bullets to HTML.
+ * Convert plain text with * bullets to HTML (centered, mono style).
  */
 function formatInstructions(text) {
   if (!text) return '';
   return text.split('\n').map(line => {
     const trimmed = line.trim();
-    if (!trimmed) return '<br>';
+    if (!trimmed) return '<div style="height:12px;"></div>';
     if (trimmed.startsWith('* ') || trimmed.startsWith('- ')) {
-      return `<div style="padding-left:16px; margin:3px 0; font-weight:300;">• ${trimmed.slice(2)}</div>`;
+      return `<div style="margin:4px 0; font-size:12px; font-weight:400; color:#999;">• ${trimmed.slice(2)}</div>`;
     }
-    return `<div style="margin:8px 0; font-weight:700; font-size:14px; letter-spacing:0.5px;">${trimmed}</div>`;
+    return `<div style="margin:10px 0 4px; font-weight:700; font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#ccc;">${trimmed}</div>`;
   }).join('');
 }
 
@@ -76,14 +76,14 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
 
   // Build extra QR blocks
   const extraQrHtml = extraQrs.map((eq, i) => `
-      <div style="text-align:center; margin-bottom:16px;">
-        <div style="color:#888; font-size:11px; text-transform:uppercase; letter-spacing:2px; margin-bottom:8px;">
-          Acceso ${i + 2} de ${totalAccess}
+      <tr><td align="center" style="padding:0 0 24px;">
+        <div style="font-family:'IBM Plex Mono','SF Mono','Courier New',monospace; color:#555; font-size:10px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px;">
+          Acceso ${i + 2} / ${totalAccess}
         </div>
-        <div style="background:#ffffff; border-radius:4px; padding:12px; display:inline-block;">
-          <img src="${eq.url}" alt="QR +${i + 1}" width="200" height="200" style="display:block;">
+        <div style="background:#ffffff; padding:12px; display:inline-block;">
+          <img src="${eq.url}" alt="QR +${i + 1}" width="180" height="180" style="display:block;">
         </div>
-      </div>
+      </td></tr>
   `).join('');
 
   const html = `
@@ -92,72 +92,89 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 </head>
-<body style="margin:0; padding:0; background:#000000; font-family:'HelveticaNeue-CondensedBold','Helvetica Neue',Helvetica,Arial,sans-serif;">
-  <div style="max-width:520px; margin:0 auto; background:#0a0a0a;">
+<body style="margin:0; padding:0; background:#000000;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#000000;">
+    <tr><td align="center" style="padding:0;">
+      <table width="520" cellpadding="0" cellspacing="0" style="max-width:520px; width:100%; background:#0a0a0a; font-family:'IBM Plex Mono','SF Mono','Courier New',monospace;">
 
-    ${bannerUrl ? `
-    <div style="width:100%; overflow:hidden;">
-      <img src="${bannerUrl}" alt="${event.name}" style="width:100%; display:block; object-fit:cover;">
-    </div>
-    ` : `
-    <div style="padding:32px 24px 16px; text-align:center;">
-      <h1 style="color:#fff; font-size:24px; margin:0; letter-spacing:1px;">${event.name}</h1>
-    </div>
-    `}
+        <!-- Banner -->
+        ${bannerUrl ? `
+        <tr><td style="padding:0;">
+          <img src="${bannerUrl}" alt="${event.name}" width="520" style="width:100%; display:block; object-fit:cover;">
+        </td></tr>
+        ` : `
+        <tr><td align="center" style="padding:40px 24px 20px;">
+          <div style="color:#fff; font-size:20px; font-weight:700; letter-spacing:2px; text-transform:uppercase;">${event.name}</div>
+        </td></tr>
+        `}
 
-    <div style="padding:24px;">
+        <!-- Divider -->
+        <tr><td style="padding:0 32px;">
+          <div style="border-top:1px solid ${color}44; height:0;"></div>
+        </td></tr>
 
-      <!-- Guest info -->
-      <div style="text-align:center; margin-bottom:20px;">
-        <div style="color:#ffffff; font-size:20px; font-weight:700; letter-spacing:1px; text-transform:uppercase;">
-          ${guest.name}
-        </div>
-        ${guest.tier ? `<div style="color:${color}; font-size:12px; text-transform:uppercase; letter-spacing:3px; margin-top:6px; font-weight:700;">${guest.tier}</div>` : ''}
-        ${totalAccess > 1 ? `<div style="color:#666; font-size:11px; margin-top:8px; text-transform:uppercase; letter-spacing:2px;">${totalAccess} accesos</div>` : ''}
-      </div>
+        <!-- Guest name + tier -->
+        <tr><td align="center" style="padding:28px 24px 8px;">
+          <div style="color:#ffffff; font-size:18px; font-weight:700; letter-spacing:3px; text-transform:uppercase;">
+            ${guest.name}
+          </div>
+          ${guest.tier ? `<div style="color:${color}; font-size:11px; text-transform:uppercase; letter-spacing:4px; margin-top:8px; font-weight:500;">${guest.tier}</div>` : ''}
+          ${totalAccess > 1 ? `<div style="color:#444; font-size:10px; margin-top:10px; text-transform:uppercase; letter-spacing:3px;">${totalAccess} accesos</div>` : ''}
+        </td></tr>
 
-      ${hasInstructions ? `
-      <!-- Instructions ES -->
-      ${instructionsEs ? `
-      <div style="border-top:1px solid #222; padding-top:20px; margin-bottom:20px;">
-        <div style="color:#cccccc; font-size:13px; line-height:1.7; font-weight:300;">
-          ${formatInstructions(instructionsEs)}
-        </div>
-      </div>
-      ` : ''}
+        <!-- Primary QR Code -->
+        <tr><td align="center" style="padding:24px 24px ${extraQrs.length > 0 ? '12' : '28'}px;">
+          ${totalAccess > 1 ? `<div style="color:#555; font-size:10px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px;">Acceso 1 / ${totalAccess}</div>` : ''}
+          <div style="background:#ffffff; padding:14px; display:inline-block;">
+            <img src="${qrUrl}" alt="QR Code" width="200" height="200" style="display:block;">
+          </div>
+        </td></tr>
 
-      <!-- Instructions EN -->
-      ${instructionsEn ? `
-      <div style="border-top:1px solid #222; padding-top:20px; margin-bottom:20px;">
-        <div style="color:#888888; font-size:12px; line-height:1.7; font-weight:300;">
-          ${formatInstructions(instructionsEn)}
-        </div>
-      </div>
-      ` : ''}
-      ` : `
-      <div style="text-align:center; color:#666; font-size:13px; margin-bottom:24px;">
-        Presenta ${totalAccess > 1 ? 'estos códigos QR' : 'este código QR'} en la entrada
-      </div>
-      `}
+        <!-- Extra QR Codes -->
+        ${extraQrHtml}
 
-      <!-- Primary QR Code -->
-      <div style="text-align:center; margin-bottom:${extraQrs.length > 0 ? '16' : '24'}px;">
-        ${totalAccess > 1 ? `<div style="color:#888; font-size:11px; text-transform:uppercase; letter-spacing:2px; margin-bottom:8px;">Acceso 1 de ${totalAccess}</div>` : ''}
-        <div style="background:#ffffff; border-radius:4px; padding:16px; display:inline-block;">
-          <img src="${qrUrl}" alt="QR Code" width="240" height="240" style="display:block;">
-        </div>
-      </div>
+        <!-- Instructions -->
+        ${hasInstructions ? `
+        <tr><td style="padding:0 32px;">
+          <div style="border-top:1px solid #1a1a1a; height:0;"></div>
+        </td></tr>
 
-      <!-- Extra QR Codes -->
-      ${extraQrHtml}
+        ${instructionsEs ? `
+        <tr><td align="center" style="padding:24px 32px 0;">
+          <div style="color:#cccccc; font-size:12px; line-height:1.9; text-align:center;">
+            ${formatInstructions(instructionsEs)}
+          </div>
+        </td></tr>
+        ` : ''}
 
-      <!-- Footer -->
-      <div style="border-top:1px solid #1a1a1a; padding-top:16px; text-align:center;">
-        <span style="color:#333; font-size:10px; letter-spacing:2px; text-transform:uppercase;">Powered by tac.colectivo.live</span>
-      </div>
-    </div>
-  </div>
+        ${instructionsEn ? `
+        <tr><td align="center" style="padding:${instructionsEs ? '16' : '24'}px 32px 0;">
+          <div style="color:#666666; font-size:11px; line-height:1.9; text-align:center;">
+            ${formatInstructions(instructionsEn)}
+          </div>
+        </td></tr>
+        ` : ''}
+        ` : `
+        <tr><td align="center" style="padding:0 32px 8px;">
+          <div style="color:#555; font-size:11px; letter-spacing:1px;">
+            Presenta ${totalAccess > 1 ? 'estos codigos QR' : 'este codigo QR'} en la entrada
+          </div>
+        </td></tr>
+        `}
+
+        <!-- Footer -->
+        <tr><td style="padding:24px 32px 0;">
+          <div style="border-top:1px solid #141414; height:0;"></div>
+        </td></tr>
+        <tr><td align="center" style="padding:16px 24px 24px;">
+          <span style="color:#2a2a2a; font-size:9px; letter-spacing:3px; text-transform:uppercase;">tac.colectivo.live</span>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
 </body>
 </html>`;
 
