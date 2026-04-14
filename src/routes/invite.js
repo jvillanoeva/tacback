@@ -111,9 +111,11 @@ router.get('/public/:token', async (req, res) => {
   });
 });
 
-// Add guest via invite link (public, no auth)
+// Add guest via invite link (public, no auth) — supports +N extras
 router.post('/public/:token/guest', async (req, res) => {
-  const { name, email } = req.body;
+  const { name, email, plus } = req.body;
+  const plusN = Math.min(parseInt(plus) || 0, 20);
+  const totalQrs = 1 + plusN;
 
   if (!name) return res.status(400).json({ error: 'Guest name is required' });
 
@@ -126,11 +128,19 @@ router.post('/public/:token/guest', async (req, res) => {
 
   if (linkErr || !link) return res.status(404).json({ error: 'Invite link not found' });
   if (!link.active) return res.status(410).json({ error: 'This invite link has been deactivated' });
-  if (link.used_count >= link.max_guests) {
-    return res.status(403).json({ error: 'This invite link has reached its limit' });
+
+  const remaining = link.max_guests - link.used_count;
+  if (remaining <= 0) {
+    return res.status(403).json({ error: 'No quedan invitaciones disponibles' });
+  }
+  if (totalQrs > remaining) {
+    return res.status(403).json({ error: `Solo quedan ${remaining} QR${remaining > 1 ? 's' : ''} disponibles` });
   }
 
-  // Insert guest
+  // Generate group_id if there are extras
+  const groupId = plusN > 0 ? require('crypto').randomUUID() : null;
+
+  // Insert primary guest
   const { data: guest, error: guestErr } = await supabase
     .from('guests')
     .insert({
@@ -141,6 +151,7 @@ router.post('/public/:token/guest', async (req, res) => {
       added_by: link.created_by,
       invite_link_id: link.id,
       qr_token: createQrToken('placeholder', link.event_id),
+      group_id: groupId,
     })
     .select()
     .single();
@@ -155,10 +166,42 @@ router.post('/public/:token/guest', async (req, res) => {
     .eq('id', guest.id);
   guest.qr_token = finalToken;
 
-  // Increment used_count
+  // Insert +N extras with same group_id
+  const insertedExtras = [];
+  if (plusN > 0) {
+    const extras = [];
+    for (let i = 1; i <= plusN; i++) {
+      extras.push({
+        event_id: link.event_id,
+        name: `${name} (+${i})`,
+        email: null,
+        tier: link.tier || null,
+        added_by: link.created_by,
+        invite_link_id: link.id,
+        qr_token: createQrToken(`extra-${i}-${Date.now()}`, link.event_id),
+        group_id: groupId,
+      });
+    }
+
+    const { data: extData, error: extErr } = await supabase
+      .from('guests')
+      .insert(extras)
+      .select();
+
+    if (!extErr && extData) {
+      for (const ext of extData) {
+        const extToken = createQrToken(ext.id, link.event_id);
+        await supabase.from('guests').update({ qr_token: extToken }).eq('id', ext.id);
+        ext.qr_token = extToken;
+        insertedExtras.push(ext);
+      }
+    }
+  }
+
+  // Increment used_count by total QRs used
   await supabase
     .from('invite_links')
-    .update({ used_count: link.used_count + 1 })
+    .update({ used_count: link.used_count + totalQrs })
     .eq('id', link.id);
 
   // Send QR email if configured and guest has email
@@ -170,7 +213,7 @@ router.post('/public/:token/guest', async (req, res) => {
         .eq('id', link.event_id)
         .single();
 
-      await sendGuestQrEmail({ guest, event, extraGuests: [] });
+      await sendGuestQrEmail({ guest, event, extraGuests: insertedExtras });
       await supabase
         .from('guests')
         .update({ email_sent: true })
@@ -181,10 +224,12 @@ router.post('/public/:token/guest', async (req, res) => {
     }
   }
 
+  const newRemaining = remaining - totalQrs;
   res.status(201).json({
     success: true,
     guest: { name: guest.name, email: guest.email, tier: guest.tier },
-    remaining: link.max_guests - link.used_count - 1,
+    totalQrs,
+    remaining: newRemaining,
   });
 });
 
