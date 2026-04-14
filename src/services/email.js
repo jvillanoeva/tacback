@@ -154,7 +154,7 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
 
       <!-- Footer -->
       <div style="border-top:1px solid #1a1a1a; padding-top:16px; text-align:center;">
-        <span style="color:#333; font-size:10px; letter-spacing:2px; text-transform:uppercase;">Powered by colectivo.live</span>
+        <span style="color:#333; font-size:10px; letter-spacing:2px; text-transform:uppercase;">Powered by tac.colectivo.live</span>
       </div>
     </div>
   </div>
@@ -162,7 +162,7 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
 </html>`;
 
   const { data, error } = await getResend().emails.send({
-    from: process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@colectivo.live>',
+    from: process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@tac.colectivo.live>',
     to: guest.email,
     subject: `🎟️ Acceso — ${event.name}`,
     html,
@@ -176,7 +176,7 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
  * Send a staff invitation email.
  */
 async function sendStaffInviteEmail({ email, role, eventName, eventSlug, hasAccount }) {
-  const webUrl = process.env.WEB_URL || 'https://www.colectivo.live';
+  const webUrl = process.env.WEB_URL || 'https://tac.colectivo.live';
   const roleLabel = role === 'door' ? 'Puerta' : 'Staff';
   const loginUrl = hasAccount
     ? `${webUrl}/login.html`
@@ -210,13 +210,13 @@ async function sendStaffInviteEmail({ email, role, eventName, eventSlug, hasAcco
         ${hasAccount ? 'Ir a Colectivo' : 'Crear cuenta'}
       </a>
     </div>
-    <p style="color:#333; font-size:10px; text-align:center; margin-top:24px; letter-spacing:2px; text-transform:uppercase;">Powered by colectivo.live</p>
+    <p style="color:#333; font-size:10px; text-align:center; margin-top:24px; letter-spacing:2px; text-transform:uppercase;">Powered by tac.colectivo.live</p>
   </div>
 </body>
 </html>`;
 
   const { data, error } = await getResend().emails.send({
-    from: process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@colectivo.live>',
+    from: process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@tac.colectivo.live>',
     to: email,
     subject: `🔑 Invitación — ${eventName}`,
     html,
