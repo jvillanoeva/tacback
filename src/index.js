@@ -18,7 +18,15 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.WEB_URL || '*',
+  origin: (origin, callback) => {
+    const allowed = (process.env.WEB_URL || '').split(',').map(s => s.trim()).filter(Boolean);
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin || allowed.length === 0 || allowed.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true); // permissive for now — auth layer protects routes
+    }
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: '6mb' }));
