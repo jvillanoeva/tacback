@@ -13,7 +13,7 @@ router.get('/', requireAuth, requireEventAccess(['owner', 'staff', 'door']), asy
 
   let query = supabase
     .from('guests')
-    .select('id, name, email, phone, notes, tier, checked_in, checked_in_at, email_sent, created_at, added_by')
+    .select('id, name, email, phone, notes, tier, checked_in, checked_in_at, email_sent, created_at, added_by, group_id')
     .eq('event_id', req.event.id)
     .order('created_at', { ascending: false });
 
