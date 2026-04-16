@@ -1,8 +1,9 @@
 const { Router } = require('express');
 const { supabase } = require('../lib/supabase');
 const { requireAuth, requireEventAccess } = require('../middleware/auth');
-const { createQrToken } = require('../services/qr');
+const { createQrToken, generateQrBuffer } = require('../services/qr');
 const { sendGuestQrEmail } = require('../services/email');
+const JSZip = require('jszip');
 
 const router = Router({ mergeParams: true });
 
@@ -40,7 +41,7 @@ router.get('/', requireAuth, requireEventAccess(['owner', 'staff', 'door']), asy
 // Add single guest (owner or staff) — supports +N extras
 router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
   const { name, email, phone, notes, tier, send_email, plus } = req.body;
-  const plusN = Math.min(parseInt(plus) || 0, 20);
+  const plusN = Math.min(parseInt(plus) || 0, 50);
 
   if (!name) return res.status(400).json({ error: 'Guest name is required' });
 
@@ -153,7 +154,7 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
 
   for (let i = 0; i < guestList.length; i++) {
     const g = guestList[i];
-    const plusN = Math.min(parseInt(g.plus) || 0, 20);
+    const plusN = Math.min(parseInt(g.plus) || 0, 50);
     const groupId = plusN > 0 ? require('crypto').randomUUID() : null;
 
     allRows.push({
@@ -362,6 +363,77 @@ router.post('/send-all', requireAuth, requireEventAccess(['owner', 'staff']), as
   }
 
   res.json({ sent, total: guests.length });
+});
+
+// Download a ZIP of all QR PNGs for a guest (and their group extras if any)
+router.get('/:guestId/qrs.zip', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
+  const { data: guest, error: gErr } = await supabase
+    .from('guests')
+    .select('*')
+    .eq('id', req.params.guestId)
+    .eq('event_id', req.event.id)
+    .single();
+
+  if (gErr || !guest) return res.status(404).json({ error: 'Guest not found' });
+
+  // Collect primary + extras (if grouped)
+  let allGuests = [guest];
+  if (guest.group_id) {
+    const { data: extras } = await supabase
+      .from('guests')
+      .select('*')
+      .eq('group_id', guest.group_id)
+      .neq('id', guest.id);
+    if (extras) allGuests = [guest, ...extras];
+  }
+
+  const zip = new JSZip();
+  const safeName = (guest.name || 'guest').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+
+  for (let i = 0; i < allGuests.length; i++) {
+    const g = allGuests[i];
+    const buffer = await generateQrBuffer(g.qr_token);
+    const fileName = i === 0
+      ? `${safeName}-1.png`
+      : `${safeName}-${i + 1}.png`;
+    zip.file(fileName, buffer);
+  }
+
+  const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}-qrs.zip"`);
+  res.send(zipBuffer);
+});
+
+// Download a ZIP of ALL QRs for the event
+router.get('/qrs.zip', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
+  const { data: guests, error } = await supabase
+    .from('guests')
+    .select('*')
+    .eq('event_id', req.event.id)
+    .order('created_at', { ascending: true });
+
+  if (error) return res.status(500).json({ error: error.message });
+  if (!guests || guests.length === 0) {
+    return res.status(404).json({ error: 'No guests found' });
+  }
+
+  const zip = new JSZip();
+
+  for (const g of guests) {
+    const buffer = await generateQrBuffer(g.qr_token);
+    const safeName = (g.name || 'guest').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    const tier = g.tier ? `${g.tier.toLowerCase()}-` : '';
+    zip.file(`${tier}${safeName}-${g.id.slice(0, 8)}.png`, buffer);
+  }
+
+  const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+  const eventSlug = req.params.slug;
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${eventSlug}-qrs.zip"`);
+  res.send(zipBuffer);
 });
 
 module.exports = router;
