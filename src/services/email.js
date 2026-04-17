@@ -42,9 +42,9 @@ function formatInstructions(text) {
     const trimmed = line.trim();
     if (!trimmed) return '<div style="height:12px;"></div>';
     if (trimmed.startsWith('* ') || trimmed.startsWith('- ')) {
-      return `<div style="margin:4px 0; font-size:12px; font-weight:400; color:#999;">• ${trimmed.slice(2)}</div>`;
+      return `<div style="margin:4px 0; font-size:13px; font-weight:400; color:#d0d0d0;">• ${trimmed.slice(2)}</div>`;
     }
-    return `<div style="margin:10px 0 4px; font-weight:700; font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#ccc;">${trimmed}</div>`;
+    return `<div style="margin:12px 0 4px; font-weight:700; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#ffffff;">${trimmed}</div>`;
   }).join('');
 }
 
@@ -77,7 +77,7 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
   // Build extra QR blocks
   const extraQrHtml = extraQrs.map((eq, i) => `
       <tr><td align="center" style="padding:0 0 24px;">
-        <div style="font-family:'IBM Plex Mono','SF Mono','Courier New',monospace; color:#555; font-size:10px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px;">
+        <div style="font-family:'IBM Plex Mono','SF Mono','Courier New',monospace; color:#aaaaaa; font-size:11px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px; font-weight:600;">
           Acceso ${i + 2} / ${totalAccess}
         </div>
         <div style="background:#ffffff; padding:12px; display:inline-block;">
@@ -120,13 +120,14 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
           <div style="color:#ffffff; font-size:18px; font-weight:700; letter-spacing:3px; text-transform:uppercase;">
             ${guest.name}
           </div>
-          ${guest.tier ? `<div style="color:${color}; font-size:11px; text-transform:uppercase; letter-spacing:4px; margin-top:8px; font-weight:500;">${guest.tier}</div>` : ''}
-          ${totalAccess > 1 ? `<div style="color:#444; font-size:10px; margin-top:10px; text-transform:uppercase; letter-spacing:3px;">${totalAccess} accesos</div>` : ''}
+          <div style="color:${color}; font-size:13px; text-transform:uppercase; letter-spacing:4px; margin-top:10px; font-weight:700;">
+            ${totalAccess > 1 ? `${totalAccess} ACCESOS` : '1 ACCESO'}${guest.tier ? ` &middot; ${guest.tier}` : ''}
+          </div>
         </td></tr>
 
         <!-- Primary QR Code -->
         <tr><td align="center" style="padding:24px 24px ${extraQrs.length > 0 ? '12' : '28'}px;">
-          ${totalAccess > 1 ? `<div style="color:#555; font-size:10px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px;">Acceso 1 / ${totalAccess}</div>` : ''}
+          ${totalAccess > 1 ? `<div style="color:#aaaaaa; font-size:11px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px; font-weight:600;">Acceso 1 / ${totalAccess}</div>` : ''}
           <div style="background:#ffffff; padding:14px; display:inline-block;">
             <img src="${qrUrl}" alt="QR Code" width="200" height="200" style="display:block;">
           </div>
@@ -143,7 +144,7 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
 
         ${instructionsEs ? `
         <tr><td align="center" style="padding:24px 32px 0;">
-          <div style="color:#cccccc; font-size:12px; line-height:1.9; text-align:center;">
+          <div style="color:#e5e5e5; font-size:13px; line-height:1.9; text-align:center;">
             ${formatInstructions(instructionsEs)}
           </div>
         </td></tr>
@@ -151,14 +152,14 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
 
         ${instructionsEn ? `
         <tr><td align="center" style="padding:${instructionsEs ? '16' : '24'}px 32px 0;">
-          <div style="color:#666666; font-size:11px; line-height:1.9; text-align:center;">
+          <div style="color:#bbbbbb; font-size:12px; line-height:1.9; text-align:center;">
             ${formatInstructions(instructionsEn)}
           </div>
         </td></tr>
         ` : ''}
         ` : `
         <tr><td align="center" style="padding:0 32px 8px;">
-          <div style="color:#555; font-size:11px; letter-spacing:1px;">
+          <div style="color:#bbbbbb; font-size:13px; letter-spacing:1px;">
             Presenta ${totalAccess > 1 ? 'estos codigos QR' : 'este codigo QR'} en la entrada
           </div>
         </td></tr>
