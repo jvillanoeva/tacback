@@ -120,7 +120,7 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
           <div style="color:#ffffff; font-size:18px; font-weight:700; letter-spacing:3px; text-transform:uppercase;">
             ${guest.name}
           </div>
-          <div style="color:${color}; font-size:13px; text-transform:uppercase; letter-spacing:4px; margin-top:10px; font-weight:700;">
+          <div style="color:#ffffff; font-size:13px; text-transform:uppercase; letter-spacing:4px; margin-top:10px; font-weight:700;">
             ${totalAccess > 1 ? `${totalAccess} ACCESOS` : '1 ACCESO'}${guest.tier ? ` &middot; ${guest.tier}` : ''}
           </div>
         </td></tr>
