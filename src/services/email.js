@@ -56,15 +56,28 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
     throw new Error('Guest has no email address');
   }
 
-  // Upload QR for primary guest
+  // Upload QR for primary guest + keep buffer for attachment
   const qrUrl = await uploadQrImage(guest.qr_token, guest.id);
+  const primaryBuffer = await generateQrBuffer(guest.qr_token);
 
-  // Upload QRs for extras
+  // Upload QRs for extras + keep buffers
   const extraQrs = [];
+  const extraBuffers = [];
   for (const ext of extraGuests) {
     const extQrUrl = await uploadQrImage(ext.qr_token, ext.id);
     extraQrs.push({ name: ext.name, url: extQrUrl });
+    extraBuffers.push(await generateQrBuffer(ext.qr_token));
   }
+
+  // Build attachments — every QR also goes as PNG attachment so user always has it
+  const safeName = (guest.name || 'guest').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+  const attachments = [
+    { filename: `${safeName}-qr-1.png`, content: primaryBuffer.toString('base64') },
+    ...extraBuffers.map((buf, i) => ({
+      filename: `${safeName}-qr-${i + 2}.png`,
+      content: buf.toString('base64'),
+    })),
+  ];
 
   const totalAccess = 1 + extraGuests.length;
   const color = event.brand_color || '#e74c3c';
@@ -76,13 +89,16 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
 
   // Build extra QR blocks
   const extraQrHtml = extraQrs.map((eq, i) => `
-      <tr><td align="center" style="padding:0 0 24px;">
+      <tr><td align="center" style="padding:0 0 8px;">
         <div style="font-family:'IBM Plex Mono','SF Mono','Courier New',monospace; color:#aaaaaa; font-size:11px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px; font-weight:600;">
           Acceso ${i + 2} / ${totalAccess}
         </div>
         <div style="background:#ffffff; padding:12px; display:inline-block;">
-          <img src="${eq.url}" alt="QR +${i + 1}" width="180" height="180" style="display:block;">
+          <a href="${eq.url}" style="text-decoration:none;"><img src="${eq.url}" alt="Codigo QR" width="180" height="180" style="display:block;"></a>
         </div>
+      </td></tr>
+      <tr><td align="center" style="padding:0 0 24px;">
+        <a href="${eq.url}" style="color:#888; font-size:10px; text-decoration:underline; letter-spacing:1px;">Si el QR no aparece, click aqui</a>
       </td></tr>
   `).join('');
 
@@ -126,11 +142,14 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
         </td></tr>
 
         <!-- Primary QR Code -->
-        <tr><td align="center" style="padding:24px 24px ${extraQrs.length > 0 ? '12' : '28'}px;">
+        <tr><td align="center" style="padding:24px 24px 8px;">
           ${totalAccess > 1 ? `<div style="color:#aaaaaa; font-size:11px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px; font-weight:600;">Acceso 1 / ${totalAccess}</div>` : ''}
           <div style="background:#ffffff; padding:14px; display:inline-block;">
-            <img src="${qrUrl}" alt="QR Code" width="200" height="200" style="display:block;">
+            <a href="${qrUrl}" style="text-decoration:none;"><img src="${qrUrl}" alt="Codigo QR" width="200" height="200" style="display:block;"></a>
           </div>
+        </td></tr>
+        <tr><td align="center" style="padding:0 24px ${extraQrs.length > 0 ? '20' : '28'}px;">
+          <a href="${qrUrl}" style="color:#888; font-size:10px; text-decoration:underline; letter-spacing:1px;">Si el QR no aparece, click aqui</a>
         </td></tr>
 
         <!-- Extra QR Codes -->
@@ -184,6 +203,7 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
     to: guest.email,
     subject: `🎟️ Acceso — ${event.name}`,
     html,
+    attachments,
   });
 
   if (error) throw error;
