@@ -56,28 +56,15 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
     throw new Error('Guest has no email address');
   }
 
-  // Upload QR for primary guest + keep buffer for attachment
+  // Upload QR for primary guest
   const qrUrl = await uploadQrImage(guest.qr_token, guest.id);
-  const primaryBuffer = await generateQrBuffer(guest.qr_token);
 
-  // Upload QRs for extras + keep buffers
+  // Upload QRs for extras
   const extraQrs = [];
-  const extraBuffers = [];
   for (const ext of extraGuests) {
     const extQrUrl = await uploadQrImage(ext.qr_token, ext.id);
     extraQrs.push({ name: ext.name, url: extQrUrl });
-    extraBuffers.push(await generateQrBuffer(ext.qr_token));
   }
-
-  // Build attachments — every QR also goes as PNG attachment so user always has it
-  const safeName = (guest.name || 'guest').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
-  const attachments = [
-    { filename: `${safeName}-qr-1.png`, content: primaryBuffer.toString('base64') },
-    ...extraBuffers.map((buf, i) => ({
-      filename: `${safeName}-qr-${i + 2}.png`,
-      content: buf.toString('base64'),
-    })),
-  ];
 
   const totalAccess = 1 + extraGuests.length;
   const color = event.brand_color || '#e74c3c';
@@ -203,7 +190,6 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
     to: guest.email,
     subject: `🎟️ Acceso — ${event.name}`,
     html,
-    attachments,
   });
 
   if (error) throw error;
