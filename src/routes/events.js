@@ -21,10 +21,10 @@ router.get('/:slug/public', async (req, res) => {
 router.get('/', requireAuth, async (req, res) => {
   const userId = req.user.id;
 
-  // Events I own
+  // Events I own (directly)
   const { data: owned, error: ownedErr } = await supabase
     .from('events')
-    .select('id, slug, name, subtitle, date_label, venue, city, published, banner_url, created_at')
+    .select('id, slug, name, subtitle, date_label, venue, city, published, banner_url, created_at, organization_id, organizations(id, slug, name, logo_url, type)')
     .eq('owner_id', userId)
     .order('created_at', { ascending: false });
 
@@ -33,7 +33,7 @@ router.get('/', requireAuth, async (req, res) => {
   // Events I'm staff on
   const { data: staffEvents } = await supabase
     .from('event_staff')
-    .select('event_id, role, events(id, slug, name, subtitle, date_label, venue, city, published, banner_url, created_at)')
+    .select('event_id, role, events(id, slug, name, subtitle, date_label, venue, city, published, banner_url, created_at, organization_id, organizations(id, slug, name, logo_url, type))')
     .eq('user_id', userId)
     .not('accepted_at', 'is', null);
 
@@ -42,9 +42,28 @@ router.get('/', requireAuth, async (req, res) => {
     staff_role: s.role,
   }));
 
+  // Events I have access to via organization membership (org members can see/manage all org events)
+  const { data: myOrgs } = await supabase
+    .from('organization_members')
+    .select('organization_id, role')
+    .eq('user_id', userId);
+
+  let viaOrg = [];
+  if (myOrgs && myOrgs.length > 0) {
+    const orgIds = myOrgs.map(m => m.organization_id);
+    const { data: orgEvents } = await supabase
+      .from('events')
+      .select('id, slug, name, subtitle, date_label, venue, city, published, banner_url, created_at, organization_id, owner_id, organizations(id, slug, name, logo_url, type)')
+      .in('organization_id', orgIds)
+      .neq('owner_id', userId) // exclude events I already own (they're in `owned`)
+      .order('created_at', { ascending: false });
+    viaOrg = orgEvents || [];
+  }
+
   res.json({
     owned: owned || [],
     staffed,
+    viaOrg,
   });
 });
 

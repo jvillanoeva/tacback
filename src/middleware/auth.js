@@ -56,7 +56,7 @@ function requireEventAccess(allowedRoles = ['owner', 'staff', 'door']) {
     // Look up the event
     const { data: event, error } = await supabase
       .from('events')
-      .select('id, owner_id')
+      .select('id, owner_id, organization_id')
       .eq('slug', slug)
       .single();
 
@@ -66,10 +66,24 @@ function requireEventAccess(allowedRoles = ['owner', 'staff', 'door']) {
 
     req.event = event;
 
-    // Check if owner
+    // Check if owner (direct event ownership)
     if (event.owner_id === userId && allowedRoles.includes('owner')) {
       req.eventRole = 'owner';
       return next();
+    }
+
+    // Check if member of the event's organization (treated as owner of the event)
+    if (event.organization_id && allowedRoles.includes('owner')) {
+      const { data: orgMember } = await supabase
+        .from('organization_members')
+        .select('role')
+        .eq('organization_id', event.organization_id)
+        .eq('user_id', userId)
+        .single();
+      if (orgMember) {
+        req.eventRole = 'owner';
+        return next();
+      }
     }
 
     // Check if staff
