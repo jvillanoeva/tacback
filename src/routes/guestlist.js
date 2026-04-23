@@ -13,7 +13,7 @@ router.get('/', requireAuth, requireEventAccess(['owner', 'staff', 'door']), asy
 
   let query = supabase
     .from('guests')
-    .select('id, name, email, phone, notes, tier, checked_in, checked_in_at, email_sent, created_at, added_by, group_id')
+    .select('id, name, email, phone, notes, tier, checked_in, checked_in_at, email_sent, created_at, added_by, group_id, requested_by, industry')
     .eq('event_id', req.event.id)
     .order('created_at', { ascending: false });
 
@@ -40,7 +40,7 @@ router.get('/', requireAuth, requireEventAccess(['owner', 'staff', 'door']), asy
 
 // Add single guest (owner or staff) — supports +N extras
 router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
-  const { name, email, phone, notes, tier, send_email, plus } = req.body;
+  const { name, email, phone, notes, tier, send_email, plus, requested_by, industry } = req.body;
   const plusN = Math.min(parseInt(plus) || 0, 50);
 
   if (!name) return res.status(400).json({ error: 'Guest name is required' });
@@ -58,6 +58,8 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
       phone: phone || null,
       notes: notes || null,
       tier: tier || null,
+      requested_by: requested_by || null,
+      industry: industry || null,
       added_by: req.user.id,
       qr_token: createQrToken(undefined, req.event.id),
       group_id: groupId,
@@ -85,6 +87,8 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
       phone: null,
       notes: `Acceso extra de ${name}`,
       tier: tier || null,
+      requested_by: requested_by || null,
+      industry: industry || null,
       added_by: req.user.id,
       qr_token: createQrToken(`extra-${i}-${Date.now()}`, req.event.id),
       group_id: groupId,

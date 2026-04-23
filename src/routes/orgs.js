@@ -85,7 +85,17 @@ router.get('/:slug', requireAuth, async (req, res) => {
     .select('role, user_id, created_at')
     .eq('organization_id', org.id);
 
-  res.json({ ...org, my_role: member.role, members: members || [] });
+  // Attach emails from auth.users
+  let membersWithEmail = members || [];
+  if (membersWithEmail.length) {
+    const { data: { users } = { users: [] } } = await supabase.auth.admin.listUsers({
+      page: 1, perPage: 1000,
+    });
+    const emailById = new Map((users || []).map(u => [u.id, u.email]));
+    membersWithEmail = membersWithEmail.map(m => ({ ...m, email: emailById.get(m.user_id) || null }));
+  }
+
+  res.json({ ...org, my_role: member.role, members: membersWithEmail });
 });
 
 // Create org
