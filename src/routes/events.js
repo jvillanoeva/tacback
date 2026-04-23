@@ -71,7 +71,7 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/:slug', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
   const { data, error } = await supabase
     .from('events')
-    .select('*')
+    .select('*, organizations(id, slug, name, logo_url, type)')
     .eq('id', req.event.id)
     .single();
 
