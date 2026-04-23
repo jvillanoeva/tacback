@@ -7,25 +7,39 @@ const { requireAuth } = require('../middleware/auth');
 const router = Router();
 
 // Accept up to 5MB images
+const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/svg+xml'];
+const EXT_BY_MIME = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/svg+xml': 'svg',
+};
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    if (allowed.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only JPEG, PNG, WebP, and GIF images are allowed'));
-    }
+    if (ALLOWED_MIMES.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Only JPEG, PNG, WebP, GIF, and SVG images are allowed'));
   },
 });
 
-router.post('/', requireAuth, upload.single('image'), async (req, res) => {
+// Wrap multer so filter / size errors return JSON 400 instead of falling through
+// to the generic 500 handler.
+function handleUpload(req, res, next) {
+  upload.single('image')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    next();
+  });
+}
+
+router.post('/', requireAuth, handleUpload, async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image file provided' });
   }
 
-  const ext = req.file.mimetype.split('/')[1].replace('jpeg', 'jpg');
+  const ext = EXT_BY_MIME[req.file.mimetype] || 'bin';
   const hash = crypto.randomBytes(4).toString('hex');
   const filename = `${req.user.id}/${Date.now()}-${hash}.${ext}`;
 
