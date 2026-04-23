@@ -12,6 +12,7 @@ const uploadRouter = require('./routes/upload');
 const reportRouter = require('./routes/report');
 const inviteRouter = require('./routes/invite');
 const orgsRouter = require('./routes/orgs');
+const ssRouter = require('./routes/ss');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -47,6 +48,7 @@ app.use('/api/events/:slug/report', reportRouter);
 app.use('/api/events/:slug/invite-links', inviteRouter);
 app.use('/api/invite', inviteRouter);
 app.use('/api/orgs', orgsRouter);
+app.use('/api/ss', ssRouter);
 
 // 404
 app.use((req, res) => {
