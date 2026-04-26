@@ -150,15 +150,16 @@ router.put('/:slug', requireAuth, requireEventAccess(['owner']), async (req, res
   res.json(data);
 });
 
-// Auth: delete (unpublish) event (owner only)
+// Auth: hard-delete an event (owner only). FK cascades drop guests,
+// event_staff, and invite_links along with the event row.
 router.delete('/:slug', requireAuth, requireEventAccess(['owner']), async (req, res) => {
   const { error } = await supabase
     .from('events')
-    .update({ published: false, updated_at: new Date().toISOString() })
+    .delete()
     .eq('id', req.event.id);
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ success: true, message: 'Event unpublished' });
+  res.json({ success: true, message: 'Event deleted' });
 });
 
 module.exports = router;
