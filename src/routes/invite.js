@@ -4,6 +4,7 @@ const { supabase } = require('../lib/supabase');
 const { requireAuth, requireEventAccess } = require('../middleware/auth');
 const { createQrToken } = require('../services/qr');
 const { sendGuestQrEmail } = require('../services/email');
+const { normalizeNfcId } = require('../lib/nfc');
 
 const router = Router({ mergeParams: true });
 
@@ -113,11 +114,16 @@ router.get('/public/:token', async (req, res) => {
 
 // Add guest via invite link (public, no auth) — supports +N extras
 router.post('/public/:token/guest', async (req, res) => {
-  const { name, email, plus } = req.body;
+  const { name, email, plus, nfc_id } = req.body;
   const plusN = Math.min(parseInt(plus) || 0, 20);
   const totalQrs = 1 + plusN;
 
   if (!name) return res.status(400).json({ error: 'Guest name is required' });
+
+  // NFC UID is optional; normalize on write so the door lookup matches.
+  // Only set on the primary guest — extras share the group but each is its own row
+  // and a card maps to one named person, not the whole group.
+  const normalizedNfc = nfc_id ? normalizeNfcId(nfc_id) : null;
 
   // Validate link
   const { data: link, error: linkErr } = await supabase
@@ -152,11 +158,17 @@ router.post('/public/:token/guest', async (req, res) => {
       invite_link_id: link.id,
       qr_token: createQrToken('placeholder', link.event_id),
       group_id: groupId,
+      nfc_id: normalizedNfc || null,
     })
     .select()
     .single();
 
-  if (guestErr) return res.status(500).json({ error: guestErr.message });
+  if (guestErr) {
+    if (guestErr.code === '23505' && /guests_event_nfc_id_unique/.test(guestErr.message || '')) {
+      return res.status(409).json({ error: 'Esa tarjeta NFC ya está asignada a otro invitado en este evento.' });
+    }
+    return res.status(500).json({ error: guestErr.message });
+  }
 
   // Update QR token with real guest ID
   const finalToken = createQrToken(guest.id, link.event_id);
