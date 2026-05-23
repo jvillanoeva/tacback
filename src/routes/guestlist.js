@@ -3,6 +3,7 @@ const { supabase } = require('../lib/supabase');
 const { requireAuth, requireEventAccess } = require('../middleware/auth');
 const { createQrToken, generateQrBuffer } = require('../services/qr');
 const { sendGuestQrEmail } = require('../services/email');
+const { normalizeNfcId } = require('../lib/nfc');
 const JSZip = require('jszip');
 
 const router = Router({ mergeParams: true });
@@ -13,7 +14,7 @@ router.get('/', requireAuth, requireEventAccess(['owner', 'staff', 'door']), asy
 
   let query = supabase
     .from('guests')
-    .select('id, name, email, phone, notes, tier, checked_in, checked_in_at, email_sent, created_at, added_by, group_id, requested_by, industry')
+    .select('id, name, email, phone, notes, tier, checked_in, checked_in_at, email_sent, created_at, added_by, group_id, requested_by, industry, nfc_id')
     .eq('event_id', req.event.id)
     .order('created_at', { ascending: false });
 
@@ -40,10 +41,16 @@ router.get('/', requireAuth, requireEventAccess(['owner', 'staff', 'door']), asy
 
 // Add single guest (owner or staff) — supports +N extras
 router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
-  const { name, email, phone, notes, tier, send_email, plus, requested_by, industry } = req.body;
+  const { name, email, phone, notes, tier, send_email, plus, requested_by, industry, nfc_id } = req.body;
   const plusN = Math.min(parseInt(plus) || 0, 50);
 
   if (!name) return res.status(400).json({ error: 'Guest name is required' });
+
+  // NFC UID is optional. Normalize on write so the door lookup (which also
+  // normalizes the reader output) matches reliably. Only set on the primary
+  // guest — +N extras share a group_id but each access pass is its own row,
+  // and the demo card maps to one named guest, not a whole group.
+  const normalizedNfc = nfc_id ? normalizeNfcId(nfc_id) : null;
 
   // Generate a group ID if there are extras
   const groupId = plusN > 0 ? require('crypto').randomUUID() : null;
@@ -60,6 +67,7 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
       tier: tier || null,
       requested_by: requested_by || null,
       industry: industry || null,
+      nfc_id: normalizedNfc || null,
       added_by: req.user.id,
       qr_token: createQrToken(undefined, req.event.id),
       group_id: groupId,
@@ -67,7 +75,14 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
     .select()
     .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) {
+    // Surface a clean message if the per-event UID uniqueness constraint
+    // rejected this insert — common cause is reusing a demo card.
+    if (error.code === '23505' && /guests_event_nfc_id_unique/.test(error.message || '')) {
+      return res.status(409).json({ error: 'Esa tarjeta NFC ya está asignada a otro invitado en este evento.' });
+    }
+    return res.status(500).json({ error: error.message });
+  }
 
   // Update QR token with actual guest ID
   const finalToken = createQrToken(guest.id, req.event.id);
@@ -250,7 +265,15 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
 
 // Update guest (owner or staff)
 router.put('/:guestId', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
-  const { name, email, phone, notes } = req.body;
+  const { name, email, phone, notes, nfc_id } = req.body;
+
+  // nfc_id semantics on PUT: undefined = leave alone, '' or null = clear,
+  // otherwise = normalize and set.
+  let nfcUpdate = {};
+  if (nfc_id !== undefined) {
+    const trimmed = String(nfc_id || '').trim();
+    nfcUpdate = { nfc_id: trimmed ? normalizeNfcId(trimmed) : null };
+  }
 
   const { data, error } = await supabase
     .from('guests')
@@ -259,13 +282,19 @@ router.put('/:guestId', requireAuth, requireEventAccess(['owner', 'staff']), asy
       ...(email !== undefined && { email }),
       ...(phone !== undefined && { phone }),
       ...(notes !== undefined && { notes }),
+      ...nfcUpdate,
     })
     .eq('id', req.params.guestId)
     .eq('event_id', req.event.id)
     .select()
     .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) {
+    if (error.code === '23505' && /guests_event_nfc_id_unique/.test(error.message || '')) {
+      return res.status(409).json({ error: 'Esa tarjeta NFC ya está asignada a otro invitado en este evento.' });
+    }
+    return res.status(500).json({ error: error.message });
+  }
   if (!data) return res.status(404).json({ error: 'Guest not found' });
   res.json(data);
 });
