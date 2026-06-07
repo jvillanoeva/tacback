@@ -126,6 +126,7 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
   const email = body.email ? String(body.email).trim() : null;
   const tier = body.tier || null;
   const added_by = body.added_by || null;
+  const plus = Math.min(parseInt(body.plus, 10) || 0, 50);   // +N companion passes
 
   if (!event_id || !name) {
     return res.status(400).json({ error: 'event_id and name are required' });
@@ -152,8 +153,12 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
     }
   }
 
-  // Insert with a placeholder token, then set the real token bound to the row id
-  // (mirrors the user-authed guestlist POST).
+  // +N companions share a group_id with the primary — each is its own access
+  // pass (own QR), but only the primary carries the email, so all the QRs ship in
+  // a single email (no duplicate-email conflict for the companions).
+  const groupId = plus > 0 ? crypto.randomUUID() : null;
+
+  // Insert primary with a placeholder token, then set the real token bound to the id.
   const { data: guest, error: insErr } = await supabase
     .from('guests')
     .insert({
@@ -162,6 +167,7 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
       email,
       tier,
       added_by,
+      group_id: groupId,
       qr_token: createQrToken(undefined, event_id),
     })
     .select()
@@ -172,12 +178,40 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
   await supabase.from('guests').update({ qr_token: finalToken }).eq('id', guest.id);
   guest.qr_token = finalToken;
 
-  // Send the QR email if we have an address.
+  // Insert the +N companion passes (no email; same group_id).
+  let extras = [];
+  if (plus > 0) {
+    const rows = [];
+    for (let i = 1; i <= plus; i++) {
+      rows.push({
+        event_id,
+        name: `${name} (+${i})`,
+        email: null,
+        tier,
+        added_by,
+        group_id: groupId,
+        qr_token: createQrToken(`extra-${i}-${Date.now()}`, event_id),
+      });
+    }
+    const { data: extData, error: extErr } = await supabase.from('guests').insert(rows).select();
+    if (extErr) {
+      console.error('[internal/guests] extras insert failed:', extErr.message);
+    } else {
+      extras = extData || [];
+      for (const ext of extras) {
+        const t = createQrToken(ext.id, event_id);
+        await supabase.from('guests').update({ qr_token: t }).eq('id', ext.id);
+        ext.qr_token = t;
+      }
+    }
+  }
+
+  // Send one email to the primary with all QRs (primary + companions).
   let email_sent = false;
   let email_error = null;
   if (email) {
     try {
-      await sendGuestQrEmail({ guest, event, extraGuests: [] });
+      await sendGuestQrEmail({ guest, event, extraGuests: extras });
       await supabase.from('guests').update({ email_sent: true }).eq('id', guest.id);
       email_sent = true;
     } catch (e) {
@@ -186,7 +220,14 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
     }
   }
 
-  res.status(201).json({ ok: true, guest_id: guest.id, email_sent, email_error });
+  res.status(201).json({
+    ok: true,
+    guest_id: guest.id,
+    group_id: groupId,
+    qr_count: 1 + extras.length,
+    email_sent,
+    email_error,
+  });
 });
 
 module.exports = router;
