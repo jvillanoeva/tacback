@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const crypto = require('crypto');
 const { supabase } = require('../lib/supabase');
+const { createQrToken } = require('../services/qr');
 const { sendGuestQrEmail } = require('../services/email');
 
 const router = Router();
@@ -102,6 +103,90 @@ router.post('/events/:slug/send-qr-all', requireServiceAuth, async (req, res) =>
   }
 
   res.json({ sent, total: guests.length, failures });
+});
+
+/**
+ * POST /api/internal/guests
+ *
+ * Headless single-guest create + (optional) QR email — the endpoint clau's
+ * agent_service.py (`_tac_add_via_internal_api`) already calls. Creates one
+ * guest with a signed QR token; if an email is present, sends the QR and marks
+ * email_sent. This is what makes clau send the QR at creation time instead of a
+ * human clicking "Send All QRs".
+ *
+ * Body: { event_id, name, email?, tier?, added_by? }
+ * Returns 201 { ok, guest_id, email_sent, email_error } on insert.
+ * Returns 409 if a guest with the same (event_id, email) already exists — the
+ * caller treats this as "skipped".
+ */
+router.post('/guests', requireServiceAuth, async (req, res) => {
+  const body = req.body || {};
+  const event_id = body.event_id;
+  const name = (body.name || '').trim();
+  const email = body.email ? String(body.email).trim() : null;
+  const tier = body.tier || null;
+  const added_by = body.added_by || null;
+
+  if (!event_id || !name) {
+    return res.status(400).json({ error: 'event_id and name are required' });
+  }
+
+  // Resolve the event (need its fields for the email template).
+  const { data: event, error: evErr } = await supabase
+    .from('events')
+    .select('id, name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name, email_instructions_es, email_instructions_en')
+    .eq('id', event_id)
+    .single();
+  if (evErr || !event) return res.status(404).json({ error: 'Event not found' });
+
+  // Dedup by (event_id, email) — matches the caller's 409 = skip contract.
+  if (email) {
+    const { data: existing } = await supabase
+      .from('guests')
+      .select('id')
+      .eq('event_id', event_id)
+      .ilike('email', email)
+      .limit(1);
+    if (existing && existing.length > 0) {
+      return res.status(409).json({ error: 'Guest with this email already exists', guest_id: existing[0].id });
+    }
+  }
+
+  // Insert with a placeholder token, then set the real token bound to the row id
+  // (mirrors the user-authed guestlist POST).
+  const { data: guest, error: insErr } = await supabase
+    .from('guests')
+    .insert({
+      event_id,
+      name,
+      email,
+      tier,
+      added_by,
+      qr_token: createQrToken(undefined, event_id),
+    })
+    .select()
+    .single();
+  if (insErr) return res.status(500).json({ error: insErr.message });
+
+  const finalToken = createQrToken(guest.id, event_id);
+  await supabase.from('guests').update({ qr_token: finalToken }).eq('id', guest.id);
+  guest.qr_token = finalToken;
+
+  // Send the QR email if we have an address.
+  let email_sent = false;
+  let email_error = null;
+  if (email) {
+    try {
+      await sendGuestQrEmail({ guest, event, extraGuests: [] });
+      await supabase.from('guests').update({ email_sent: true }).eq('id', guest.id);
+      email_sent = true;
+    } catch (e) {
+      email_error = e.message;
+      console.error(`[internal/guests] email failed for ${email}:`, e.message);
+    }
+  }
+
+  res.status(201).json({ ok: true, guest_id: guest.id, email_sent, email_error });
 });
 
 module.exports = router;
