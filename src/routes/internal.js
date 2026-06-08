@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { supabase } = require('../lib/supabase');
 const { createQrToken } = require('../services/qr');
 const { sendGuestQrEmail } = require('../services/email');
+const { sendUndistributedForEvent } = require('../services/undistributed');
 
 const router = Router();
 
@@ -228,6 +229,31 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
     email_sent,
     email_error,
   });
+});
+
+/**
+ * POST /api/internal/events/:slug/send-undistributed
+ *
+ * Headless counterpart to POST /api/events/:slug/invite-links/send-undistributed.
+ * Emails each table's account manager the QRs they never handed out. Intended
+ * for a scheduled trigger (e.g. event-day morning cron) carrying the service
+ * token. Skips tables with no manager_email and tables already fully used, so
+ * it's safe to run repeatedly.
+ */
+router.post('/events/:slug/send-undistributed', requireServiceAuth, async (req, res) => {
+  const { data: event, error } = await supabase
+    .from('events')
+    .select('id, slug')
+    .eq('slug', req.params.slug)
+    .single();
+  if (error || !event) return res.status(404).json({ error: 'Event not found' });
+
+  try {
+    const result = await sendUndistributedForEvent(event.id);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 module.exports = router;

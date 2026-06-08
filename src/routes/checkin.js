@@ -6,9 +6,20 @@ const { normalizeNfcId } = require('../lib/nfc');
 
 const router = Router();
 
-// Verify QR and check in guest — optimized for speed
+// Verify QR and check in guest — optimized for speed.
+//
+// Two-stage access (keineln): body { token, stage }.
+//   stage = 'gate'  (default) — main gate at the venue. Anti-passback: a QR
+//                    already scanned at the gate is rejected as 'already'.
+//                    Sets gate_scanned_at AND checked_in (keeps existing
+//                    dashboards/counts meaningful).
+//   stage = 'table' — table door. Reveals the table + account manager so staff
+//                     can confirm who owns the table. Independent anti-passback
+//                     on table_scanned_at. Does NOT require a prior gate scan
+//                     (operationally the two doors are staffed separately).
 router.post('/', requireAuth, async (req, res) => {
-  const { token } = req.body;
+  const { token, stage } = req.body;
+  const scanStage = stage === 'table' ? 'table' : 'gate';
 
   if (!token) return res.status(400).json({ error: 'QR token is required' });
 
@@ -19,10 +30,10 @@ router.post('/', requireAuth, async (req, res) => {
     return res.json({ status: 'invalid', message: 'Código QR inválido' });
   }
 
-  // Single query: get guest + event in one shot
+  // Single query: get guest in one shot (+ scan stamps + which table/link)
   const { data: guest, error } = await supabase
     .from('guests')
-    .select('id, name, email, notes, tier, checked_in, checked_in_at, event_id')
+    .select('id, name, email, notes, tier, checked_in, checked_in_at, gate_scanned_at, table_scanned_at, invite_link_id, event_id')
     .eq('qr_token', token)
     .single();
 
@@ -30,10 +41,13 @@ router.post('/', requireAuth, async (req, res) => {
     return res.json({ status: 'invalid', message: 'Acceso no encontrado' });
   }
 
-  // Parallel: check event access + (if not already checked in) prepare for check-in
-  const [eventResult, staffResult] = await Promise.all([
+  // Parallel: event (for access + name) + staff role + table (account manager)
+  const [eventResult, staffResult, linkResult] = await Promise.all([
     supabase.from('events').select('id, name, owner_id, organization_id').eq('id', guest.event_id).single(),
     supabase.from('event_staff').select('role').eq('event_id', guest.event_id).eq('user_id', req.user.id).not('accepted_at', 'is', null).single(),
+    guest.invite_link_id
+      ? supabase.from('invite_links').select('label, manager_name').eq('id', guest.invite_link_id).single()
+      : Promise.resolve({ data: null }),
   ]);
 
   const event = eventResult.data;
@@ -58,20 +72,49 @@ router.post('/', requireAuth, async (req, res) => {
     return res.status(403).json({ error: 'No tienes acceso a este evento' });
   }
 
-  // Already checked in?
-  if (guest.checked_in) {
+  const table = linkResult.data
+    ? { label: linkResult.data.label, manager: linkResult.data.manager_name }
+    : null;
+  const guestPayload = { name: guest.name, tier: guest.tier, notes: guest.notes };
+
+  // ── Stage 2: table door ──────────────────────────────────────────────────
+  if (scanStage === 'table') {
+    if (guest.table_scanned_at) {
+      return res.json({
+        status: 'already_checked_in', stage: 'table',
+        message: 'Ya ingresó a la mesa', table,
+        guest: { ...guestPayload, checked_in_at: guest.table_scanned_at },
+      });
+    }
+    const { error: uErr } = await supabase
+      .from('guests')
+      .update({ table_scanned_at: new Date().toISOString(), table_scanned_by: req.user.id })
+      .eq('id', guest.id);
+    if (uErr) return res.status(500).json({ error: 'Error al registrar en mesa' });
+
     return res.json({
-      status: 'already_checked_in',
-      message: 'Ya registrado',
-      guest: { name: guest.name, tier: guest.tier, notes: guest.notes, checked_in_at: guest.checked_in_at },
+      status: 'success', stage: 'table',
+      message: table ? table.label : 'Acceso a mesa',
+      table, guest: guestPayload,
     });
   }
 
-  // Check in + get counts in parallel
+  // ── Stage 1: main gate (default) — anti-passback ─────────────────────────
+  if (guest.gate_scanned_at) {
+    return res.json({
+      status: 'already_checked_in', stage: 'gate',
+      message: 'Ya ingresó por puerta principal', table,
+      guest: { ...guestPayload, checked_in_at: guest.gate_scanned_at },
+    });
+  }
+
+  const now = new Date().toISOString();
   const [updateResult, totalResult, checkedResult] = await Promise.all([
     supabase.from('guests').update({
+      gate_scanned_at: now,
+      gate_scanned_by: req.user.id,
       checked_in: true,
-      checked_in_at: new Date().toISOString(),
+      checked_in_at: now,
       checked_in_by: req.user.id,
     }).eq('id', guest.id),
     supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id),
@@ -83,9 +126,10 @@ router.post('/', requireAuth, async (req, res) => {
   }
 
   res.json({
-    status: 'success',
+    status: 'success', stage: 'gate',
     message: '¡Acceso confirmado!',
-    guest: { name: guest.name, tier: guest.tier, notes: guest.notes },
+    guest: guestPayload,
+    table,
     event: { name: event.name },
     stats: {
       checked_in: (checkedResult.count || 0) + 1, // +1 because the count query may race with update

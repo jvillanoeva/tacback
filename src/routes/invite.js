@@ -4,6 +4,7 @@ const { supabase } = require('../lib/supabase');
 const { requireAuth, requireEventAccess } = require('../middleware/auth');
 const { createQrToken } = require('../services/qr');
 const { sendGuestQrEmail } = require('../services/email');
+const { sendUndistributedForEvent } = require('../services/undistributed');
 const { normalizeNfcId } = require('../lib/nfc');
 
 const router = Router({ mergeParams: true });
@@ -20,6 +21,57 @@ router.get('/', requireAuth, requireEventAccess(['owner']), async (req, res) => 
 
   if (error) return res.status(500).json({ error: error.message });
   res.json(data || []);
+});
+
+// Supervisor view: every table (invite link) with its guests' two-stage scan
+// state, for a per-table / per-QR overview. Owner or staff.
+router.get('/scan-status', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
+  const [linksRes, guestsRes] = await Promise.all([
+    supabase
+      .from('invite_links')
+      .select('id, label, tier, max_guests, used_count, manager_name, manager_email, active')
+      .eq('event_id', req.event.id)
+      .order('created_at', { ascending: true }),
+    supabase
+      .from('guests')
+      .select('id, name, email, invite_link_id, gate_scanned_at, table_scanned_at, email_sent')
+      .eq('event_id', req.event.id),
+  ]);
+
+  if (linksRes.error) return res.status(500).json({ error: linksRes.error.message });
+
+  const byLink = {};
+  for (const g of guestsRes.data || []) {
+    const k = g.invite_link_id || 'none';
+    (byLink[k] = byLink[k] || []).push(g);
+  }
+
+  const tables = (linksRes.data || []).map(l => {
+    const guests = byLink[l.id] || [];
+    return {
+      ...l,
+      guests,
+      counts: {
+        loaded: guests.length,
+        gate: guests.filter(g => g.gate_scanned_at).length,
+        table: guests.filter(g => g.table_scanned_at).length,
+      },
+    };
+  });
+
+  res.json({ tables, unassigned: byLink['none'] || [] });
+});
+
+// Fallback send: email each table's account manager the QRs they never handed
+// out (undistributed quota). Manual trigger for the dashboard button; the
+// headless/cron counterpart lives in routes/internal.js. Owner only.
+router.post('/send-undistributed', requireAuth, requireEventAccess(['owner']), async (req, res) => {
+  try {
+    const result = await sendUndistributedForEvent(req.event.id);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Create invite link

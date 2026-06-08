@@ -250,4 +250,111 @@ async function sendStaffInviteEmail({ email, role, eventName, eventSlug, hasAcco
   return data;
 }
 
-module.exports = { sendGuestQrEmail, sendStaffInviteEmail };
+/**
+ * Send a BUNDLE of QR codes to a table's account manager in one email.
+ * Used by the "undistributed QR" fallback: on the cutoff (e.g. event-day
+ * morning), any quota a manager never handed out is generated as passes and
+ * emailed to the manager so they can distribute them physically.
+ *
+ * @param {object}   args
+ * @param {string}   args.managerEmail
+ * @param {string}   [args.managerName]
+ * @param {string}   args.tableLabel   - e.g. "Mesa 7" / "Palco 35"
+ * @param {object}   args.event        - needs name, brand_color?, banner_url?
+ * @param {object[]} args.guests       - each needs { id, name, qr_token }
+ */
+async function sendManagerQrBundle({ managerEmail, managerName, tableLabel, event, guests = [] }) {
+  if (!managerEmail) throw new Error('Manager has no email address');
+  if (!guests.length) throw new Error('No QRs to send');
+
+  // Upload every QR to storage so the email embeds a public image URL.
+  const items = [];
+  for (const g of guests) {
+    const url = await uploadQrImage(g.qr_token, g.id);
+    items.push({ name: g.name, url });
+  }
+
+  const color = event.brand_color || '#e74c3c';
+  const bannerUrl = event.banner_url || '';
+
+  const qrBlocks = items.map((it, i) => `
+      <tr><td align="center" style="padding:0 0 8px;">
+        <div style="color:#aaaaaa; font-size:11px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px; font-weight:600;">
+          ${it.name} &middot; ${i + 1}/${items.length}
+        </div>
+        <div style="background:#ffffff; padding:12px; display:inline-block;">
+          <a href="${it.url}" style="text-decoration:none;"><img src="${it.url}" alt="Codigo QR" width="190" height="190" style="display:block;"></a>
+        </div>
+      </td></tr>
+      <tr><td align="center" style="padding:0 0 24px;">
+        <a href="${it.url}" style="color:#888; font-size:10px; text-decoration:underline; letter-spacing:1px;">Si el QR no aparece, click aqui</a>
+      </td></tr>
+  `).join('');
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body style="margin:0; padding:0; background:#000000;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#000000;">
+    <tr><td align="center" style="padding:0;">
+      <table width="520" cellpadding="0" cellspacing="0" style="max-width:520px; width:100%; background:#0a0a0a; font-family:'IBM Plex Mono','SF Mono','Courier New',monospace;">
+
+        ${bannerUrl ? `
+        <tr><td style="padding:0;">
+          <img src="${bannerUrl}" alt="${event.name}" width="520" style="width:100%; display:block; object-fit:cover;">
+        </td></tr>
+        ` : `
+        <tr><td align="center" style="padding:40px 24px 20px;">
+          <div style="color:#fff; font-size:20px; font-weight:700; letter-spacing:2px; text-transform:uppercase;">${event.name}</div>
+        </td></tr>
+        `}
+
+        <tr><td style="padding:0 32px;">
+          <div style="border-top:1px solid ${color}44; height:0;"></div>
+        </td></tr>
+
+        <tr><td align="center" style="padding:28px 24px 4px;">
+          <div style="color:#ffffff; font-size:18px; font-weight:700; letter-spacing:3px; text-transform:uppercase;">${tableLabel}</div>
+          <div style="color:#bbbbbb; font-size:12px; letter-spacing:2px; margin-top:10px;">
+            ${managerName ? `${managerName} &middot; ` : ''}${items.length} ${items.length === 1 ? 'PASE SIN ASIGNAR' : 'PASES SIN ASIGNAR'}
+          </div>
+        </td></tr>
+
+        <tr><td align="center" style="padding:18px 32px 22px;">
+          <div style="color:#999999; font-size:12px; line-height:1.8;">
+            Estos son los accesos de tu mesa que aun no repartiste. Cada QR es un acceso individual &mdash; compartelos con tus invitados.
+          </div>
+        </td></tr>
+
+        ${qrBlocks}
+
+        <tr><td style="padding:8px 32px 0;">
+          <div style="border-top:1px solid #141414; height:0;"></div>
+        </td></tr>
+        <tr><td align="center" style="padding:16px 24px 24px;">
+          <span style="color:#2a2a2a; font-size:9px; letter-spacing:3px; text-transform:uppercase;">tac.colectivo.live</span>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+  const { data, error } = await getResend().emails.send({
+    from: process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@tac.colectivo.live>',
+    to: managerEmail,
+    subject: `🎟️ Pases de ${tableLabel} — ${event.name}`,
+    html,
+  });
+
+  if (error) throw error;
+  return data;
+}
+
+module.exports = { sendGuestQrEmail, sendStaffInviteEmail, sendManagerQrBundle };
