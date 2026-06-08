@@ -142,6 +142,45 @@ router.delete('/:linkId', requireAuth, requireEventAccess(['owner']), async (req
   res.json({ success: true });
 });
 
+// Cancel ONE QR (guest) under a table and free its quota slot.
+// Deleting the guest row removes its qr_token, so the QR stops resolving at the
+// door — an effective cancel — and used_count is decremented so the slot frees.
+router.delete('/:linkId/guests/:guestId', requireAuth, requireEventAccess(['owner']), async (req, res) => {
+  const { linkId, guestId } = req.params;
+
+  // Guest must belong to this event (scopes the delete).
+  const { data: guest, error: gErr } = await supabase
+    .from('guests')
+    .select('id')
+    .eq('id', guestId)
+    .eq('event_id', req.event.id)
+    .single();
+  if (gErr || !guest) return res.status(404).json({ error: 'Guest not found' });
+
+  const { error: delErr } = await supabase
+    .from('guests')
+    .delete()
+    .eq('id', guestId)
+    .eq('event_id', req.event.id);
+  if (delErr) return res.status(500).json({ error: delErr.message });
+
+  // Free the slot on the parent link (never below 0).
+  const { data: link } = await supabase
+    .from('invite_links')
+    .select('used_count')
+    .eq('id', linkId)
+    .eq('event_id', req.event.id)
+    .single();
+  if (link) {
+    await supabase
+      .from('invite_links')
+      .update({ used_count: Math.max(0, (link.used_count || 0) - 1) })
+      .eq('id', linkId);
+  }
+
+  res.json({ success: true });
+});
+
 // --- Public endpoints (no auth — token IS the access) ---
 
 // Get invite link info (public)
