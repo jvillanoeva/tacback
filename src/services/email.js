@@ -56,13 +56,13 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
     throw new Error('Guest has no email address');
   }
 
-  // Upload QR for primary guest
-  const qrUrl = await uploadQrImage(guest.qr_token, guest.id);
+  // Encode the short code (fast, low-density QR); fall back to the legacy JWT.
+  const qrUrl = await uploadQrImage(guest.short_code || guest.qr_token, guest.id);
 
   // Upload QRs for extras
   const extraQrs = [];
   for (const ext of extraGuests) {
-    const extQrUrl = await uploadQrImage(ext.qr_token, ext.id);
+    const extQrUrl = await uploadQrImage(ext.short_code || ext.qr_token, ext.id);
     extraQrs.push({ name: ext.name, url: extQrUrl });
   }
 
@@ -270,7 +270,7 @@ async function sendManagerQrBundle({ managerEmail, managerName, tableLabel, even
   // Upload every QR to storage so the email embeds a public image URL.
   const items = [];
   for (const g of guests) {
-    const url = await uploadQrImage(g.qr_token, g.id);
+    const url = await uploadQrImage(g.short_code || g.qr_token, g.id);
     items.push({ name: g.name, url });
   }
 

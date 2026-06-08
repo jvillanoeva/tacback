@@ -23,21 +23,28 @@ router.post('/', requireAuth, async (req, res) => {
 
   if (!token) return res.status(400).json({ error: 'QR token is required' });
 
-  // Decode signed token
-  try {
-    verifyQrToken(token);
-  } catch (err) {
-    return res.json({ status: 'invalid', message: 'Código QR inválido' });
+  // Resolve the scanned value: new short code first (fast, low-density QR),
+  // then fall back to the legacy signed JWT so already-issued QRs keep working.
+  const SEL = 'id, name, email, notes, tier, checked_in, checked_in_at, gate_scanned_at, table_scanned_at, invite_link_id, event_id';
+
+  let { data: guest } = await supabase
+    .from('guests')
+    .select(SEL)
+    .eq('short_code', token)
+    .maybeSingle();
+
+  if (!guest) {
+    // Legacy path: only look up by qr_token if it's a validly signed JWT.
+    let validJwt = true;
+    try { verifyQrToken(token); } catch (err) { validJwt = false; }
+    if (!validJwt) {
+      return res.json({ status: 'invalid', message: 'Código QR inválido' });
+    }
+    const r = await supabase.from('guests').select(SEL).eq('qr_token', token).maybeSingle();
+    guest = r.data;
   }
 
-  // Single query: get guest in one shot (+ scan stamps + which table/link)
-  const { data: guest, error } = await supabase
-    .from('guests')
-    .select('id, name, email, notes, tier, checked_in, checked_in_at, gate_scanned_at, table_scanned_at, invite_link_id, event_id')
-    .eq('qr_token', token)
-    .single();
-
-  if (error || !guest) {
+  if (!guest) {
     return res.json({ status: 'invalid', message: 'Acceso no encontrado' });
   }
 
@@ -86,11 +93,21 @@ router.post('/', requireAuth, async (req, res) => {
         guest: { ...guestPayload, checked_in_at: guest.table_scanned_at },
       });
     }
-    const { error: uErr } = await supabase
+    // Atomic: mark only if not already scanned at the table. If 0 rows change,
+    // another scan won the race → treat as already used (no double entry).
+    const { data: upd, error: uErr } = await supabase
       .from('guests')
       .update({ table_scanned_at: new Date().toISOString(), table_scanned_by: req.user.id })
-      .eq('id', guest.id);
+      .eq('id', guest.id)
+      .is('table_scanned_at', null)
+      .select('id');
     if (uErr) return res.status(500).json({ error: 'Error al registrar en mesa' });
+    if (!upd || upd.length === 0) {
+      return res.json({
+        status: 'already_checked_in', stage: 'table',
+        message: 'Ya ingresó a la mesa', table, guest: guestPayload,
+      });
+    }
 
     return res.json({
       status: 'success', stage: 'table',
@@ -109,21 +126,35 @@ router.post('/', requireAuth, async (req, res) => {
   }
 
   const now = new Date().toISOString();
-  const [updateResult, totalResult, checkedResult] = await Promise.all([
-    supabase.from('guests').update({
+  // Atomic: claim the gate scan only if not already scanned. If 0 rows change,
+  // a simultaneous scan beat us → reject as already used (no double entry).
+  const { data: upd, error: updErr } = await supabase
+    .from('guests')
+    .update({
       gate_scanned_at: now,
       gate_scanned_by: req.user.id,
       checked_in: true,
       checked_in_at: now,
       checked_in_by: req.user.id,
-    }).eq('id', guest.id),
+    })
+    .eq('id', guest.id)
+    .is('gate_scanned_at', null)
+    .select('id');
+
+  if (updErr) {
+    return res.status(500).json({ error: 'Error al registrar entrada' });
+  }
+  if (!upd || upd.length === 0) {
+    return res.json({
+      status: 'already_checked_in', stage: 'gate',
+      message: 'Ya ingresó por puerta principal', table, guest: guestPayload,
+    });
+  }
+
+  const [totalResult, checkedResult] = await Promise.all([
     supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id),
     supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id).eq('checked_in', true),
   ]);
-
-  if (updateResult.error) {
-    return res.status(500).json({ error: 'Error al registrar entrada' });
-  }
 
   res.json({
     status: 'success', stage: 'gate',
@@ -132,7 +163,7 @@ router.post('/', requireAuth, async (req, res) => {
     table,
     event: { name: event.name },
     stats: {
-      checked_in: (checkedResult.count || 0) + 1, // +1 because the count query may race with update
+      checked_in: checkedResult.count || 0, // update already committed above
       total: totalResult.count || 0,
     },
   });
