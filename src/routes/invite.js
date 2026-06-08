@@ -29,7 +29,7 @@ router.get('/scan-status', requireAuth, requireEventAccess(['owner', 'staff']), 
   const [linksRes, guestsRes] = await Promise.all([
     supabase
       .from('invite_links')
-      .select('id, label, tier, max_guests, used_count, manager_name, manager_email, active')
+      .select('id, token, label, tier, max_guests, used_count, manager_name, manager_email, active')
       .eq('event_id', req.event.id)
       .order('created_at', { ascending: true }),
     supabase
@@ -74,9 +74,9 @@ router.post('/send-undistributed', requireAuth, requireEventAccess(['owner']), a
   }
 });
 
-// Create invite link
+// Create invite link (table). Now also accepts the account manager.
 router.post('/', requireAuth, requireEventAccess(['owner']), async (req, res) => {
-  const { label, tier, max_guests, auto_send_email } = req.body;
+  const { label, tier, max_guests, auto_send_email, manager_name, manager_email } = req.body;
 
   if (!label) return res.status(400).json({ error: 'Label is required' });
 
@@ -91,6 +91,8 @@ router.post('/', requireAuth, requireEventAccess(['owner']), async (req, res) =>
       tier: tier || null,
       max_guests: Math.min(parseInt(max_guests) || 20, 500),
       auto_send_email: auto_send_email !== false,
+      manager_name: manager_name || null,
+      manager_email: manager_email ? manager_email.trim().toLowerCase() : null,
       created_by: req.user.id,
     })
     .select()
@@ -100,13 +102,25 @@ router.post('/', requireAuth, requireEventAccess(['owner']), async (req, res) =>
   res.status(201).json(data);
 });
 
-// Toggle active/inactive
+// Update a table: active toggle, label, quota, and account manager.
+// Only the fields present in the body are changed.
 router.patch('/:linkId', requireAuth, requireEventAccess(['owner']), async (req, res) => {
-  const { active } = req.body;
+  const { active, label, max_guests, manager_name, manager_email } = req.body;
+
+  const update = {};
+  if (active !== undefined) update.active = active;
+  if (label !== undefined) update.label = label;
+  if (max_guests !== undefined) update.max_guests = Math.min(parseInt(max_guests) || 0, 500);
+  if (manager_name !== undefined) update.manager_name = manager_name || null;
+  if (manager_email !== undefined) update.manager_email = manager_email ? manager_email.trim().toLowerCase() : null;
+
+  if (Object.keys(update).length === 0) {
+    return res.status(400).json({ error: 'No fields to update' });
+  }
 
   const { data, error } = await supabase
     .from('invite_links')
-    .update({ active })
+    .update(update)
     .eq('id', req.params.linkId)
     .eq('event_id', req.event.id)
     .select()
