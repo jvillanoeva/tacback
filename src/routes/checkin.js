@@ -32,7 +32,7 @@ router.post('/', requireAuth, async (req, res) => {
 
   // Parallel: check event access + (if not already checked in) prepare for check-in
   const [eventResult, staffResult] = await Promise.all([
-    supabase.from('events').select('id, name, owner_id').eq('id', guest.event_id).single(),
+    supabase.from('events').select('id, name, owner_id, organization_id').eq('id', guest.event_id).single(),
     supabase.from('event_staff').select('role').eq('event_id', guest.event_id).eq('user_id', req.user.id).not('accepted_at', 'is', null).single(),
   ]);
 
@@ -41,7 +41,20 @@ router.post('/', requireAuth, async (req, res) => {
 
   const isOwner = event.owner_id === req.user.id;
   const isStaff = !!staffResult.data;
-  if (!isOwner && !isStaff) {
+
+  // Org members get default access — mirrors /nfc and /event/:id.
+  let isOrgMember = false;
+  if (!isOwner && !isStaff && event.organization_id) {
+    const { data: om } = await supabase
+      .from('organization_members')
+      .select('role')
+      .eq('organization_id', event.organization_id)
+      .eq('user_id', req.user.id)
+      .single();
+    isOrgMember = !!om;
+  }
+
+  if (!isOwner && !isStaff && !isOrgMember) {
     return res.status(403).json({ error: 'No tienes acceso a este evento' });
   }
 
@@ -96,7 +109,7 @@ router.post('/manual', requireAuth, async (req, res) => {
 
   // Verify access
   const [eventResult, staffResult] = await Promise.all([
-    supabase.from('events').select('id, owner_id').eq('id', guest.event_id).single(),
+    supabase.from('events').select('id, owner_id, organization_id').eq('id', guest.event_id).single(),
     supabase.from('event_staff').select('role').eq('event_id', guest.event_id).eq('user_id', req.user.id).not('accepted_at', 'is', null).single(),
   ]);
 
@@ -105,7 +118,20 @@ router.post('/manual', requireAuth, async (req, res) => {
 
   const isOwner = event.owner_id === req.user.id;
   const isStaff = !!staffResult.data;
-  if (!isOwner && !isStaff) {
+
+  // Org members get default access — mirrors /nfc and /event/:id.
+  let isOrgMember = false;
+  if (!isOwner && !isStaff && event.organization_id) {
+    const { data: om } = await supabase
+      .from('organization_members')
+      .select('role')
+      .eq('organization_id', event.organization_id)
+      .eq('user_id', req.user.id)
+      .single();
+    isOrgMember = !!om;
+  }
+
+  if (!isOwner && !isStaff && !isOrgMember) {
     return res.status(403).json({ error: 'No access' });
   }
 
