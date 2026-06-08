@@ -27,6 +27,7 @@ function verifyQrToken(token) {
  */
 async function generateQrDataUrl(token) {
   return QRCode.toDataURL(token, {
+    errorCorrectionLevel: 'L', // lower density → faster to scan (token is a long JWT)
     width: 400,
     margin: 2,
     color: { dark: '#080808', light: '#ffffff' },
@@ -38,6 +39,7 @@ async function generateQrDataUrl(token) {
  */
 async function generateQrBuffer(token) {
   return QRCode.toBuffer(token, {
+    errorCorrectionLevel: 'L', // lower density → faster to scan (token is a long JWT)
     width: 400,
     margin: 2,
     color: { dark: '#080808', light: '#ffffff' },
