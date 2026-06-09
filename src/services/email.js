@@ -56,6 +56,19 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
     throw new Error('Guest has no email address');
   }
 
+  // If this guest came in through a table's magic link, show who invited them
+  // and to which table. Looked up here so every send path (initial, resend,
+  // fallback) includes it without each caller passing it.
+  let invite = null;
+  if (guest.invite_link_id) {
+    const { data: link } = await supabase
+      .from('invite_links')
+      .select('label, manager_name')
+      .eq('id', guest.invite_link_id)
+      .single();
+    if (link) invite = { tableLabel: link.label, managerName: link.manager_name };
+  }
+
   // Encode the short code (fast, low-density QR); fall back to the legacy JWT.
   const qrUrl = await uploadQrImage(guest.short_code || guest.qr_token, guest.id);
 
@@ -127,6 +140,12 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
             ${totalAccess > 1 ? `${totalAccess} ACCESOS` : '1 ACCESO'}${guest.tier ? ` &middot; ${guest.tier}` : ''}
           </div>
         </td></tr>
+        ${invite && (invite.tableLabel || invite.managerName) ? `
+        <tr><td align="center" style="padding:0 24px 4px;">
+          <div style="color:#cfcfcf; font-size:12px; letter-spacing:1px;">
+            ${invite.tableLabel ? `Mesa: <span style="color:#ffffff; font-weight:700;">${invite.tableLabel}</span>` : ''}${invite.managerName ? `${invite.tableLabel ? ' &middot; ' : ''}Te invita: <span style="color:#ffffff; font-weight:700;">${invite.managerName}</span>` : ''}
+          </div>
+        </td></tr>` : ''}
 
         <!-- Primary QR Code -->
         <tr><td align="center" style="padding:24px 24px 8px;">
