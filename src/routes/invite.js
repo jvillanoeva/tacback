@@ -34,7 +34,7 @@ router.get('/scan-status', requireAuth, requireEventAccess(['owner', 'staff']), 
       .order('created_at', { ascending: true }),
     supabase
       .from('guests')
-      .select('id, name, email, invite_link_id, gate_scanned_at, table_scanned_at, email_sent')
+      .select('id, name, email, invite_link_id, group_id, gate_scanned_at, table_scanned_at, email_sent')
       .eq('event_id', req.event.id),
   ]);
 
