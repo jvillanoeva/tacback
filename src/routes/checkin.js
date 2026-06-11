@@ -171,12 +171,13 @@ router.post('/', requireAuth, async (req, res) => {
 
 // Manual check-in by guest ID (no QR needed)
 router.post('/manual', requireAuth, async (req, res) => {
-  const { guest_id } = req.body;
+  const { guest_id, stage } = req.body;
+  const scanStage = stage === 'table' ? 'table' : 'gate';
   if (!guest_id) return res.status(400).json({ error: 'guest_id is required' });
 
   const { data: guest, error: gErr } = await supabase
     .from('guests')
-    .select('id, name, notes, checked_in, event_id')
+    .select('id, name, notes, checked_in, gate_scanned_at, table_scanned_at, event_id')
     .eq('id', guest_id)
     .single();
 
@@ -210,22 +211,39 @@ router.post('/manual', requireAuth, async (req, res) => {
     return res.status(403).json({ error: 'No access' });
   }
 
-  if (guest.checked_in) {
-    return res.json({ status: 'already_checked_in', message: 'Ya registrado' });
+  const now = new Date().toISOString();
+
+  // Manual table-door check-in.
+  if (scanStage === 'table') {
+    if (guest.table_scanned_at) {
+      return res.json({ status: 'already_checked_in', stage: 'table', message: 'Ya registrado en mesa' });
+    }
+    const { error: uErr } = await supabase
+      .from('guests')
+      .update({ table_scanned_at: now, table_scanned_by: req.user.id })
+      .eq('id', guest.id);
+    if (uErr) return res.status(500).json({ error: 'Check-in failed' });
+    return res.json({ status: 'success', stage: 'table', message: '¡Mesa registrada!', guest: { name: guest.name } });
   }
 
+  // Manual main-gate check-in (default) — also sets the legacy checked_in flag.
+  if (guest.gate_scanned_at || guest.checked_in) {
+    return res.json({ status: 'already_checked_in', stage: 'gate', message: 'Ya registrado' });
+  }
   const { error: uErr } = await supabase
     .from('guests')
     .update({
+      gate_scanned_at: now,
+      gate_scanned_by: req.user.id,
       checked_in: true,
-      checked_in_at: new Date().toISOString(),
+      checked_in_at: now,
       checked_in_by: req.user.id,
     })
     .eq('id', guest.id);
 
   if (uErr) return res.status(500).json({ error: 'Check-in failed' });
 
-  res.json({ status: 'success', message: '¡Entrada registrada!', guest: { name: guest.name } });
+  res.json({ status: 'success', stage: 'gate', message: '¡Entrada registrada!', guest: { name: guest.name } });
 });
 
 // NFC card UID lookup — door access decision only.
