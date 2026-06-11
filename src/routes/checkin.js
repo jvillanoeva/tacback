@@ -1,4 +1,5 @@
 const { Router } = require('express');
+const crypto = require('crypto');
 const { supabase } = require('../lib/supabase');
 const { requireAuth } = require('../middleware/auth');
 const { verifyQrToken } = require('../services/qr');
@@ -400,6 +401,100 @@ router.get('/event/:event_id', requireAuth, async (req, res) => {
     date_label: event.date_label,
     venue: event.venue,
     city: event.city,
+  });
+});
+
+// ── Public scanner (no login) ──────────────────────────────────────────────
+// The scanner links carry a per-event "door key" (events.door_token). Anyone
+// with the link can scan — no Supabase account needed — but only for this one
+// event. Rotate events.door_token to revoke all links.
+function doorTokenOk(eventDoorToken, provided) {
+  if (!eventDoorToken || !provided) return false;
+  const a = Buffer.from(String(provided));
+  const b = Buffer.from(String(eventDoorToken));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+const PUBLIC_GUEST_SEL = 'id, name, notes, tier, checked_in, gate_scanned_at, table_scanned_at, invite_link_id, event_id';
+
+// Event header + counts for the scanner idle screen (door-key gated).
+router.get('/public/info', async (req, res) => {
+  const { slug, k } = req.query;
+  const { data: event } = await supabase
+    .from('events').select('id, name, date_label, venue, door_token').eq('slug', slug).single();
+  if (!event || !doorTokenOk(event.door_token, k)) {
+    return res.status(403).json({ error: 'Link de acceso inválido' });
+  }
+  const [totalRes, checkedRes] = await Promise.all([
+    supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id),
+    supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id).eq('checked_in', true),
+  ]);
+  res.json({
+    name: event.name, date_label: event.date_label, venue: event.venue,
+    stats: { checked_in: checkedRes.count || 0, total_guests: totalRes.count || 0 },
+  });
+});
+
+// Public check-in. Body: { slug, k, token, stage }. Mirrors POST '/' but
+// authenticated by the door key instead of a user session; *_by stays null.
+router.post('/public', async (req, res) => {
+  const { slug, k, token, stage } = req.body;
+  const scanStage = stage === 'table' ? 'table' : 'gate';
+  if (!slug || !k || !token) return res.status(400).json({ error: 'Faltan parámetros' });
+
+  const { data: event } = await supabase
+    .from('events').select('id, name, door_token').eq('slug', slug).single();
+  if (!event || !doorTokenOk(event.door_token, k)) {
+    return res.status(403).json({ error: 'Link de acceso inválido' });
+  }
+
+  // Resolve scanned value: short code first, then legacy JWT — scoped to event.
+  let { data: guest } = await supabase
+    .from('guests').select(PUBLIC_GUEST_SEL).eq('event_id', event.id).eq('short_code', token).maybeSingle();
+  if (!guest) {
+    try { verifyQrToken(token); } catch (e) { return res.json({ status: 'invalid', message: 'Código QR inválido' }); }
+    const r = await supabase.from('guests').select(PUBLIC_GUEST_SEL).eq('event_id', event.id).eq('qr_token', token).maybeSingle();
+    guest = r.data;
+  }
+  if (!guest) return res.json({ status: 'invalid', message: 'Acceso no encontrado' });
+
+  let table = null;
+  if (guest.invite_link_id) {
+    const { data: link } = await supabase.from('invite_links').select('label, manager_name').eq('id', guest.invite_link_id).single();
+    if (link) table = { label: link.label, manager: link.manager_name };
+  }
+  const guestPayload = { name: guest.name, tier: guest.tier, notes: guest.notes };
+  const now = new Date().toISOString();
+
+  if (scanStage === 'table') {
+    if (guest.table_scanned_at) {
+      return res.json({ status: 'already_checked_in', stage: 'table', message: 'Ya ingresó a la mesa', table, guest: guestPayload });
+    }
+    const { data: upd, error: uErr } = await supabase
+      .from('guests').update({ table_scanned_at: now }).eq('id', guest.id).is('table_scanned_at', null).select('id');
+    if (uErr) return res.status(500).json({ error: 'Error al registrar en mesa' });
+    if (!upd || upd.length === 0) return res.json({ status: 'already_checked_in', stage: 'table', message: 'Ya ingresó a la mesa', table, guest: guestPayload });
+    return res.json({ status: 'success', stage: 'table', message: table ? table.label : 'Acceso a mesa', table, guest: guestPayload });
+  }
+
+  if (guest.gate_scanned_at) {
+    return res.json({ status: 'already_checked_in', stage: 'gate', message: 'Ya ingresó por puerta principal', table, guest: guestPayload });
+  }
+  const { data: upd, error: updErr } = await supabase
+    .from('guests').update({ gate_scanned_at: now, checked_in: true, checked_in_at: now })
+    .eq('id', guest.id).is('gate_scanned_at', null).select('id');
+  if (updErr) return res.status(500).json({ error: 'Error al registrar entrada' });
+  if (!upd || upd.length === 0) {
+    return res.json({ status: 'already_checked_in', stage: 'gate', message: 'Ya ingresó por puerta principal', table, guest: guestPayload });
+  }
+  const [totalRes, checkedRes] = await Promise.all([
+    supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id),
+    supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id).eq('checked_in', true),
+  ]);
+  res.json({
+    status: 'success', stage: 'gate', message: '¡Acceso confirmado!', guest: guestPayload, table,
+    event: { name: event.name },
+    stats: { checked_in: checkedRes.count || 0, total: totalRes.count || 0 },
   });
 });
 
