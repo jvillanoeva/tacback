@@ -425,7 +425,7 @@ router.get('/:guestId/qrs.zip', requireAuth, requireEventAccess(['owner', 'staff
 
   for (let i = 0; i < allGuests.length; i++) {
     const g = allGuests[i];
-    const buffer = await generateQrBuffer(g.qr_token);
+    const buffer = await generateQrBuffer(g.short_code || g.qr_token);
     const fileName = i === 0
       ? `${safeName}-1.png`
       : `${safeName}-${i + 1}.png`;
@@ -455,7 +455,7 @@ router.get('/qrs.zip', requireAuth, requireEventAccess(['owner', 'staff']), asyn
   const zip = new JSZip();
 
   for (const g of guests) {
-    const buffer = await generateQrBuffer(g.qr_token);
+    const buffer = await generateQrBuffer(g.short_code || g.qr_token);
     const safeName = (g.name || 'guest').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
     const tier = g.tier ? `${g.tier.toLowerCase()}-` : '';
     zip.file(`${tier}${safeName}-${g.id.slice(0, 8)}.png`, buffer);
