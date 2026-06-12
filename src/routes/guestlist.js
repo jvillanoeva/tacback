@@ -434,6 +434,10 @@ router.get('/:guestId/qrs.zip', requireAuth, requireEventAccess(['owner', 'staff
 
   const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
 
+  supabase.from('guest_activity').insert({
+    event_id: req.event.id, guest_id: req.params.guestId, action: 'download_batch', source: 'guestlist', actor_id: req.user.id,
+  }).then(() => {}, () => {});
+
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${safeName}-qrs.zip"`);
   res.send(zipBuffer);
@@ -467,6 +471,21 @@ router.get('/qrs.zip', requireAuth, requireEventAccess(['owner', 'staff']), asyn
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${eventSlug}-qrs.zip"`);
   res.send(zipBuffer);
+});
+
+// Log a per-guest activity event (download, etc.) — fire-and-forget from the UI.
+router.post('/:guestId/activity', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
+  const { action, source } = req.body;
+  if (!action) return res.status(400).json({ error: 'action is required' });
+  const { error } = await supabase.from('guest_activity').insert({
+    event_id: req.event.id,
+    guest_id: req.params.guestId,
+    action,
+    source: source || null,
+    actor_id: req.user.id,
+  });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
 });
 
 module.exports = router;

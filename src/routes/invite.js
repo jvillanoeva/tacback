@@ -26,7 +26,7 @@ router.get('/', requireAuth, requireEventAccess(['owner']), async (req, res) => 
 // Supervisor view: every table (invite link) with its guests' two-stage scan
 // state, for a per-table / per-QR overview. Owner or staff.
 router.get('/scan-status', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
-  const [linksRes, guestsRes] = await Promise.all([
+  const [linksRes, guestsRes, dlRes] = await Promise.all([
     supabase
       .from('invite_links')
       .select('id, token, label, tier, max_guests, used_count, manager_name, manager_email, active')
@@ -34,14 +34,30 @@ router.get('/scan-status', requireAuth, requireEventAccess(['owner', 'staff']), 
       .order('created_at', { ascending: true }),
     supabase
       .from('guests')
-      .select('id, name, email, invite_link_id, group_id, gate_scanned_at, table_scanned_at, email_sent')
+      .select('id, name, email, invite_link_id, group_id, short_code, gate_scanned_at, table_scanned_at, email_sent')
       .eq('event_id', req.event.id),
+    supabase
+      .from('guest_activity')
+      .select('guest_id, created_at')
+      .eq('event_id', req.event.id)
+      .in('action', ['download', 'download_batch']),
   ]);
 
   if (linksRes.error) return res.status(500).json({ error: linksRes.error.message });
 
+  // Aggregate per-guest download history (count + last time).
+  const dl = {};
+  for (const a of dlRes.data || []) {
+    const d = dl[a.guest_id] || { count: 0, last: null };
+    d.count += 1;
+    if (!d.last || a.created_at > d.last) d.last = a.created_at;
+    dl[a.guest_id] = d;
+  }
+
   const byLink = {};
   for (const g of guestsRes.data || []) {
+    g.dl_count = (dl[g.id] || {}).count || 0;
+    g.dl_last = (dl[g.id] || {}).last || null;
     const k = g.invite_link_id || 'none';
     (byLink[k] = byLink[k] || []).push(g);
   }
