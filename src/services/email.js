@@ -49,11 +49,145 @@ function formatInstructions(text) {
 }
 
 /**
+ * RSVP variant lookup. Callers pass `guest`/`event` objects with varying
+ * column subsets (tier / rsvp_promo often missing), so this resolves both
+ * from the DB by guest.id. Returns the event's rsvp_promo jsonb when the
+ * guest is RSVP-tier on a promo event, else null → normal black template.
+ */
+async function getRsvpPromo(guest) {
+  const { data: g } = await supabase
+    .from('guests').select('tier, event_id').eq('id', guest.id).single();
+  if (!g || g.tier !== 'RSVP') return null;
+  const { data: ev } = await supabase
+    .from('events').select('rsvp_promo').eq('id', g.event_id).single();
+  return (ev && ev.rsvp_promo) || null;
+}
+
+/**
+ * Green RSVP template — Sunday Sunday landing style (design ref 2026-07-04):
+ * solid #3fe23f background, #1d1f1d ink, Helvetica, pill borders, QR on a
+ * white rounded card (dark modules need a light quiet zone to scan).
+ * Copy/labels come from event.rsvp_promo.email so the template stays generic.
+ * RSVP guests never have extras (+0 by rule), so only the primary QR renders.
+ */
+async function sendRsvpGuestQrEmail({ guest, event, promo }) {
+  const cfg = (promo && promo.email) || {};
+  const GREEN = '#3fe23f';
+  const INK = '#1d1f1d';
+  const PILL = `border:1.5px solid ${INK}; border-radius:999px; display:inline-block;`;
+
+  const qrUrl = await uploadQrImage(guest.short_code || guest.qr_token, guest.id);
+
+  const pills = Array.isArray(cfg.pills) ? cfg.pills : [];
+  const headline = (Array.isArray(cfg.headline) && cfg.headline.length ? cfg.headline : [event.name]).join('<br>');
+  const datePill = cfg.date_pill || event.date_label || '';
+  const sub = cfg.sub || [event.venue, event.city, event.time_label].filter(Boolean).join(' · ');
+
+  const paragraphs = String(cfg.body_es || '')
+    .split(/\n\s*\n/).map(s => s.trim()).filter(Boolean)
+    .map((p, i) => `<p style="margin:0 0 12px; font-size:14px; line-height:1.6; ${i === 0 ? 'font-weight:700;' : 'font-weight:500;'}">${p}</p>`)
+    .join('');
+  const bullets = (Array.isArray(cfg.bullets) ? cfg.bullets : [])
+    .map(b => `<p style="margin:0 0 8px; font-size:13px; font-weight:500; line-height:1.5;">&bull;&nbsp; ${b}</p>`)
+    .join('');
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0; padding:0; background:${GREEN};">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:${GREEN};">
+    <tr><td align="center" style="padding:0;">
+      <table width="520" cellpadding="0" cellspacing="0" style="max-width:520px; width:100%; background:${GREEN}; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; color:${INK};">
+
+        ${pills.length ? `
+        <tr><td style="padding:24px 24px 0;">
+          <table width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td align="left"><span style="${PILL} padding:5px 14px; font-weight:700; font-size:12px; letter-spacing:2px;">${pills[0]}</span></td>
+            ${pills[1] ? `<td align="right"><span style="${PILL} padding:5px 14px; font-weight:700; font-size:12px; letter-spacing:2px;">${pills[1]}</span></td>` : ''}
+          </tr></table>
+        </td></tr>` : ''}
+
+        <tr><td align="center" style="padding:30px 24px 0;">
+          <div style="font-style:italic; font-weight:800; font-size:46px; line-height:.95; letter-spacing:-1px;">${headline}</div>
+        </td></tr>
+
+        ${datePill ? `
+        <tr><td align="center" style="padding:20px 24px 0;">
+          <span style="${PILL} padding:7px 22px; font-weight:800; font-size:16px; letter-spacing:3px;">${datePill}</span>
+        </td></tr>` : ''}
+
+        ${sub ? `
+        <tr><td align="center" style="padding:10px 24px 0;">
+          <div style="font-weight:600; font-size:13px; letter-spacing:1px;">${sub}</div>
+        </td></tr>` : ''}
+
+        ${paragraphs ? `
+        <tr><td style="padding:26px 30px 0; text-align:left;">
+          ${paragraphs}
+        </td></tr>` : ''}
+
+        ${bullets ? `
+        <tr><td style="padding:4px 30px 0;">
+          <table width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td style="border:1.5px solid ${INK}; border-radius:12px; padding:12px 16px 6px; text-align:left;">
+              ${bullets}
+            </td>
+          </tr></table>
+        </td></tr>` : ''}
+
+        <tr><td align="center" style="padding:26px 24px 6px;">
+          <table cellpadding="0" cellspacing="0"><tr>
+            <td align="center" style="background:#ffffff; border-radius:16px; padding:18px 18px 12px;">
+              <a href="${qrUrl}" style="text-decoration:none;"><img src="${qrUrl}" alt="Codigo QR" width="200" height="200" style="display:block;"></a>
+              <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; color:${INK}; font-weight:800; font-size:12px; letter-spacing:1px; margin-top:8px; text-transform:uppercase;">${guest.name}${guest.tier ? ` &middot; ${guest.tier}` : ''}</div>
+            </td>
+          </tr></table>
+        </td></tr>
+        <tr><td align="center" style="padding:0 24px 8px;">
+          <a href="${qrUrl}" style="color:${INK}; font-size:11px; font-weight:600; text-decoration:underline;">Si el QR no aparece, click aqui</a>
+        </td></tr>
+
+        <tr><td style="padding:22px 24px 24px;">
+          <table width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td align="left" style="font-style:italic; font-weight:800; font-size:13px; color:${INK};">${(Array.isArray(cfg.headline) ? cfg.headline.join(' ') : event.name)}</td>
+            <td align="right" style="font-style:italic; font-weight:800; font-size:13px; color:${INK};">${datePill}</td>
+          </tr></table>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+  const { data, error } = await getResend().emails.send({
+    from: process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@tac.colectivo.live>',
+    to: guest.email,
+    subject: cfg.subject || `Tu acceso — ${event.name}`,
+    html,
+  });
+
+  if (error) throw error;
+  return data;
+}
+
+/**
  * Send a branded QR code email to a guest.
  */
 async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
   if (!guest.email) {
     throw new Error('Guest has no email address');
+  }
+
+  // RSVP-tier guests on an event with rsvp_promo get the green variant.
+  // Everyone else (sponsors, comps, other events) keeps the template below.
+  const rsvpPromo = await getRsvpPromo(guest);
+  if (rsvpPromo) {
+    return sendRsvpGuestQrEmail({ guest, event, promo: rsvpPromo });
   }
 
   // If this guest came in through a table's magic link, show who invited them

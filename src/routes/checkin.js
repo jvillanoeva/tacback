@@ -7,6 +7,75 @@ const { normalizeNfcId } = require('../lib/nfc');
 
 const router = Router();
 
+// ── RSVP door promo ────────────────────────────────────────────────────────
+// Active ONLY when the event has rsvp_promo (jsonb, see sql/003-rsvp-promo.sql)
+// AND the guest's tier is 'RSVP'. Every other guest/event takes the unchanged
+// code paths below — zero behavior change (Sunday Sunday 05.07.26 brief).
+const RSVP_TIER = 'RSVP';
+
+function promoActive(event, guest) {
+  return !!(event && event.rsvp_promo && guest && guest.tier === RSVP_TIER);
+}
+
+// Minutes since midnight in America/Mexico_City from SERVER time. The cutoff
+// must never trust the scanning phone's clock.
+function cdmxMinutesNow() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Mexico_City', hour12: false, hour: '2-digit', minute: '2-digit',
+  }).formatToParts(new Date());
+  const get = t => parseInt(parts.find(p => p.type === t).value, 10);
+  return (get('hour') % 24) * 60 + get('minute');
+}
+
+function pastCutoff(promo) {
+  const m = String(promo.cutoff || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return false;
+  return cdmxMinutesNow() >= parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+}
+
+// Response block the scan page renders huge. price 0 = GRATIS.
+function promoPayload(promo, price, slot) {
+  const free = promo.free_slots || 0;
+  return {
+    price,
+    slot: slot || null,
+    free_total: free,
+    remaining_free: price === 0 && slot ? Math.max(0, free - slot) : 0,
+    full_price: promo.full_price || null,
+  };
+}
+
+// Shared RSVP gate check-in. Slot assignment happens inside the Postgres
+// function rsvp_gate_checkin (advisory-locked per event) so two phones can
+// never both take the last free slot. Returns one of:
+//   { kind:'already', price, slot }  — stored result, never recomputed
+//   { kind:'expired' }               — at/after cutoff, NO check-in recorded
+//   { kind:'success', price, slot }
+//   { kind:'error' }
+async function rsvpGateCheckin({ guest, event, userId }) {
+  const promo = event.rsvp_promo;
+  if (guest.gate_scanned_at) {
+    return { kind: 'already', price: guest.promo_price, slot: guest.promo_slot };
+  }
+  if (pastCutoff(promo)) return { kind: 'expired' };
+
+  const { data, error } = await supabase.rpc('rsvp_gate_checkin', {
+    p_guest_id: guest.id,
+    p_event_id: event.id,
+    p_free_slots: promo.free_slots || 0,
+    p_price_after: promo.price_after || 0,
+    p_scanned_by: userId || null,
+  });
+  if (error) return { kind: 'error' };
+  if (!data || !data.claimed) {
+    // Lost the race — re-read the stored result assigned by the winning scan.
+    const { data: g } = await supabase
+      .from('guests').select('promo_price, promo_slot').eq('id', guest.id).single();
+    return { kind: 'already', price: g ? g.promo_price : null, slot: g ? g.promo_slot : null };
+  }
+  return { kind: 'success', price: data.price, slot: data.slot };
+}
+
 // Verify QR and check in guest — optimized for speed.
 //
 // Two-stage access (keineln): body { token, stage }.
@@ -26,7 +95,7 @@ router.post('/', requireAuth, async (req, res) => {
 
   // Resolve the scanned value: new short code first (fast, low-density QR),
   // then fall back to the legacy signed JWT so already-issued QRs keep working.
-  const SEL = 'id, name, email, notes, tier, checked_in, checked_in_at, gate_scanned_at, table_scanned_at, invite_link_id, event_id';
+  const SEL = 'id, name, email, notes, tier, checked_in, checked_in_at, gate_scanned_at, table_scanned_at, invite_link_id, event_id, promo_price, promo_slot';
 
   let { data: guest } = await supabase
     .from('guests')
@@ -51,7 +120,7 @@ router.post('/', requireAuth, async (req, res) => {
 
   // Parallel: event (for access + name) + staff role + table (account manager)
   const [eventResult, staffResult, linkResult] = await Promise.all([
-    supabase.from('events').select('id, name, owner_id, organization_id').eq('id', guest.event_id).single(),
+    supabase.from('events').select('id, name, owner_id, organization_id, rsvp_promo').eq('id', guest.event_id).single(),
     supabase.from('event_staff').select('role').eq('event_id', guest.event_id).eq('user_id', req.user.id).not('accepted_at', 'is', null).single(),
     guest.invite_link_id
       ? supabase.from('invite_links').select('label, manager_name').eq('id', guest.invite_link_id).single()
@@ -117,6 +186,40 @@ router.post('/', requireAuth, async (req, res) => {
     });
   }
 
+  // ── RSVP promo lane (gate only) ───────────────────────────────────────────
+  // Everything below this block is the unchanged pre-promo flow.
+  if (promoActive(event, guest)) {
+    const promo = event.rsvp_promo;
+    const r = await rsvpGateCheckin({ guest, event, userId: req.user.id });
+    if (r.kind === 'error') return res.status(500).json({ error: 'Error al registrar entrada' });
+    if (r.kind === 'expired') {
+      return res.json({
+        status: 'expired', stage: 'gate',
+        message: `QR expirado — cover completo $${promo.full_price || ''}`,
+        guest: guestPayload,
+        promo: { ...promoPayload(promo, promo.full_price ?? null, null), expired: true },
+      });
+    }
+    if (r.kind === 'already') {
+      return res.json({
+        status: 'already_checked_in', stage: 'gate',
+        message: 'Ya escaneado', table,
+        guest: { ...guestPayload, checked_in_at: guest.gate_scanned_at },
+        promo: promoPayload(promo, r.price, r.slot),
+      });
+    }
+    const [totalR, checkedR] = await Promise.all([
+      supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id),
+      supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id).eq('checked_in', true),
+    ]);
+    return res.json({
+      status: 'success', stage: 'gate', message: '¡Acceso confirmado!',
+      guest: guestPayload, table, event: { name: event.name },
+      promo: promoPayload(promo, r.price, r.slot),
+      stats: { checked_in: checkedR.count || 0, total: totalR.count || 0 },
+    });
+  }
+
   // ── Stage 1: main gate (default) — anti-passback ─────────────────────────
   if (guest.gate_scanned_at) {
     return res.json({
@@ -178,7 +281,7 @@ router.post('/manual', requireAuth, async (req, res) => {
 
   const { data: guest, error: gErr } = await supabase
     .from('guests')
-    .select('id, name, notes, checked_in, gate_scanned_at, table_scanned_at, event_id')
+    .select('id, name, notes, tier, checked_in, gate_scanned_at, table_scanned_at, event_id, promo_price, promo_slot')
     .eq('id', guest_id)
     .single();
 
@@ -186,7 +289,7 @@ router.post('/manual', requireAuth, async (req, res) => {
 
   // Verify access
   const [eventResult, staffResult] = await Promise.all([
-    supabase.from('events').select('id, owner_id, organization_id').eq('id', guest.event_id).single(),
+    supabase.from('events').select('id, owner_id, organization_id, rsvp_promo').eq('id', guest.event_id).single(),
     supabase.from('event_staff').select('role').eq('event_id', guest.event_id).eq('user_id', req.user.id).not('accepted_at', 'is', null).single(),
   ]);
 
@@ -225,6 +328,56 @@ router.post('/manual', requireAuth, async (req, res) => {
       .eq('id', guest.id);
     if (uErr) return res.status(500).json({ error: 'Check-in failed' });
     return res.json({ status: 'success', stage: 'table', message: '¡Mesa registrada!', guest: { name: guest.name } });
+  }
+
+  // RSVP promo lane (gate only). Manual is the fallback for guests who can't
+  // find their email — same slot/pricing as a QR scan. After the cutoff the QR
+  // is rejected, but manual stays available as the deliberate escape hatch:
+  // staff records the entry at full cover.
+  if (promoActive(event, guest)) {
+    const promo = event.rsvp_promo;
+    if (guest.gate_scanned_at || guest.checked_in) {
+      return res.json({
+        status: 'already_checked_in', stage: 'gate', message: 'Ya escaneado',
+        guest: { name: guest.name },
+        promo: promoPayload(promo, guest.promo_price, guest.promo_slot),
+      });
+    }
+    if (pastCutoff(promo)) {
+      const fullPrice = promo.full_price ?? null;
+      const { data: upd, error: xErr } = await supabase
+        .from('guests')
+        .update({
+          gate_scanned_at: now, gate_scanned_by: req.user.id,
+          checked_in: true, checked_in_at: now, checked_in_by: req.user.id,
+          promo_price: fullPrice, promo_slot: null,
+        })
+        .eq('id', guest.id).is('gate_scanned_at', null).select('id');
+      if (xErr) return res.status(500).json({ error: 'Check-in failed' });
+      if (!upd || upd.length === 0) {
+        return res.json({ status: 'already_checked_in', stage: 'gate', message: 'Ya escaneado', guest: { name: guest.name } });
+      }
+      return res.json({
+        status: 'success', stage: 'gate',
+        message: `Entrada registrada — cover completo $${fullPrice || ''}`,
+        guest: { name: guest.name },
+        promo: { ...promoPayload(promo, fullPrice, null), expired: true },
+      });
+    }
+    const r = await rsvpGateCheckin({ guest, event, userId: req.user.id });
+    if (r.kind === 'error') return res.status(500).json({ error: 'Check-in failed' });
+    if (r.kind === 'already') {
+      return res.json({
+        status: 'already_checked_in', stage: 'gate', message: 'Ya escaneado',
+        guest: { name: guest.name },
+        promo: promoPayload(promo, r.price, r.slot),
+      });
+    }
+    return res.json({
+      status: 'success', stage: 'gate', message: '¡Entrada registrada!',
+      guest: { name: guest.name },
+      promo: promoPayload(promo, r.price, r.slot),
+    });
   }
 
   // Manual main-gate check-in (default) — also sets the legacy checked_in flag.
@@ -415,7 +568,7 @@ function doorTokenOk(eventDoorToken, provided) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-const PUBLIC_GUEST_SEL = 'id, name, notes, tier, checked_in, gate_scanned_at, table_scanned_at, invite_link_id, event_id';
+const PUBLIC_GUEST_SEL = 'id, name, notes, tier, checked_in, gate_scanned_at, table_scanned_at, invite_link_id, event_id, promo_price, promo_slot';
 
 // Event header + counts for the scanner idle screen (door-key gated).
 router.get('/public/info', async (req, res) => {
@@ -443,7 +596,7 @@ router.post('/public', async (req, res) => {
   if (!slug || !k || !token) return res.status(400).json({ error: 'Faltan parámetros' });
 
   const { data: event } = await supabase
-    .from('events').select('id, name, door_token').eq('slug', slug).single();
+    .from('events').select('id, name, door_token, rsvp_promo').eq('slug', slug).single();
   if (!event || !doorTokenOk(event.door_token, k)) {
     return res.status(403).json({ error: 'Link de acceso inválido' });
   }
@@ -475,6 +628,39 @@ router.post('/public', async (req, res) => {
     if (uErr) return res.status(500).json({ error: 'Error al registrar en mesa' });
     if (!upd || upd.length === 0) return res.json({ status: 'already_checked_in', stage: 'table', message: 'Ya ingresó a la mesa', table, guest: guestPayload });
     return res.json({ status: 'success', stage: 'table', message: table ? table.label : 'Acceso a mesa', table, guest: guestPayload });
+  }
+
+  // RSVP promo lane (gate only) — mirrors the authed route; *_by stays null.
+  if (promoActive(event, guest)) {
+    const promo = event.rsvp_promo;
+    const r = await rsvpGateCheckin({ guest, event, userId: null });
+    if (r.kind === 'error') return res.status(500).json({ error: 'Error al registrar entrada' });
+    if (r.kind === 'expired') {
+      return res.json({
+        status: 'expired', stage: 'gate',
+        message: `QR expirado — cover completo $${promo.full_price || ''}`,
+        guest: guestPayload,
+        promo: { ...promoPayload(promo, promo.full_price ?? null, null), expired: true },
+      });
+    }
+    if (r.kind === 'already') {
+      return res.json({
+        status: 'already_checked_in', stage: 'gate',
+        message: 'Ya escaneado', table,
+        guest: { ...guestPayload, checked_in_at: guest.gate_scanned_at },
+        promo: promoPayload(promo, r.price, r.slot),
+      });
+    }
+    const [totalR, checkedR] = await Promise.all([
+      supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id),
+      supabase.from('guests').select('*', { count: 'exact', head: true }).eq('event_id', event.id).eq('checked_in', true),
+    ]);
+    return res.json({
+      status: 'success', stage: 'gate', message: '¡Acceso confirmado!',
+      guest: guestPayload, table, event: { name: event.name },
+      promo: promoPayload(promo, r.price, r.slot),
+      stats: { checked_in: checkedR.count || 0, total: totalR.count || 0 },
+    });
   }
 
   if (guest.gate_scanned_at) {
