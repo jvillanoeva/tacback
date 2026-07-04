@@ -91,6 +91,15 @@ async function sendRsvpGuestQrEmail({ guest, event, promo }) {
     .map(b => `<p style="margin:0 0 8px; font-size:13px; font-weight:500; line-height:1.5;">&bull;&nbsp; ${b}</p>`)
     .join('');
 
+  // Optional English section (body_en / bullets_en) — slightly smaller, same style.
+  const paragraphsEn = String(cfg.body_en || '')
+    .split(/\n\s*\n/).map(s => s.trim()).filter(Boolean)
+    .map((p, i) => `<p style="margin:0 0 10px; font-size:13px; line-height:1.55; ${i === 0 ? 'font-weight:700;' : 'font-weight:500;'}">${p}</p>`)
+    .join('');
+  const bulletsEn = (Array.isArray(cfg.bullets_en) ? cfg.bullets_en : [])
+    .map(b => `<p style="margin:0 0 8px; font-size:12px; font-weight:500; line-height:1.5;">&bull;&nbsp; ${b}</p>`)
+    .join('');
+
   const html = `
 <!DOCTYPE html>
 <html>
@@ -135,6 +144,20 @@ async function sendRsvpGuestQrEmail({ guest, event, promo }) {
           <table width="100%" cellpadding="0" cellspacing="0"><tr>
             <td style="border:1.5px solid ${INK}; border-radius:12px; padding:12px 16px 6px; text-align:left;">
               ${bullets}
+            </td>
+          </tr></table>
+        </td></tr>` : ''}
+
+        ${paragraphsEn ? `
+        <tr><td style="padding:24px 30px 0; text-align:left;">
+          ${paragraphsEn}
+        </td></tr>` : ''}
+
+        ${bulletsEn ? `
+        <tr><td style="padding:4px 30px 0;">
+          <table width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td style="border:1.5px solid ${INK}; border-radius:12px; padding:12px 16px 6px; text-align:left;">
+              ${bulletsEn}
             </td>
           </tr></table>
         </td></tr>` : ''}
