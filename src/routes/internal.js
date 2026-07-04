@@ -107,6 +107,34 @@ router.post('/events/:slug/send-qr-all', requireServiceAuth, async (req, res) =>
 });
 
 /**
+ * GET /api/internal/events
+ *
+ * Service-auth event list so headless agents (clau) can resolve "the Sunday
+ * event" to a real id/slug instead of guessing which event is active. Returns
+ * the 20 most recent events, newest first.
+ *
+ * Optional query: ?q=<substring> — case-insensitive filter on slug or name
+ * (e.g. ?q=sunday or ?q=05-07-26).
+ */
+router.get('/events', requireServiceAuth, async (req, res) => {
+  let query = supabase
+    .from('events')
+    .select('id, slug, name, date_label, venue, city, published, created_at')
+    .order('created_at', { ascending: false })
+    .limit(20);
+
+  const q = String(req.query.q || '').trim();
+  if (q) {
+    const like = `%${q.replace(/[%_]/g, '')}%`;
+    query = query.or(`slug.ilike.${like},name.ilike.${like}`);
+  }
+
+  const { data, error } = await query;
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ events: data || [] });
+});
+
+/**
  * POST /api/internal/guests
  *
  * Headless single-guest create + (optional) QR email — the endpoint clau's
@@ -115,31 +143,34 @@ router.post('/events/:slug/send-qr-all', requireServiceAuth, async (req, res) =>
  * email_sent. This is what makes clau send the QR at creation time instead of a
  * human clicking "Send All QRs".
  *
- * Body: { event_id, name, email?, tier?, added_by? }
+ * Body: { event_id | event_slug, name, email?, tier?, added_by?, plus? }
+ * Target the event by id OR by slug (slug wins for callers that resolve events
+ * via GET /api/internal/events — safer than guessing an id).
  * Returns 201 { ok, guest_id, email_sent, email_error } on insert.
  * Returns 409 if a guest with the same (event_id, email) already exists — the
  * caller treats this as "skipped".
  */
 router.post('/guests', requireServiceAuth, async (req, res) => {
   const body = req.body || {};
-  const event_id = body.event_id;
+  const event_slug = body.event_slug ? String(body.event_slug).trim() : null;
   const name = (body.name || '').trim();
   const email = body.email ? String(body.email).trim() : null;
   const tier = body.tier || null;
   const added_by = body.added_by || null;
   const plus = Math.min(parseInt(body.plus, 10) || 0, 50);   // +N companion passes
 
-  if (!event_id || !name) {
-    return res.status(400).json({ error: 'event_id and name are required' });
+  if ((!body.event_id && !event_slug) || !name) {
+    return res.status(400).json({ error: 'name and event_id or event_slug are required' });
   }
 
-  // Resolve the event (need its fields for the email template).
+  // Resolve the event by slug or id (need its fields for the email template).
   const { data: event, error: evErr } = await supabase
     .from('events')
     .select('id, name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name, email_instructions_es, email_instructions_en')
-    .eq('id', event_id)
+    .eq(event_slug ? 'slug' : 'id', event_slug || body.event_id)
     .single();
   if (evErr || !event) return res.status(404).json({ error: 'Event not found' });
+  const event_id = event.id;
 
   // Dedup by (event_id, email) — matches the caller's 409 = skip contract.
   if (email) {
