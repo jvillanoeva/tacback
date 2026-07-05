@@ -263,6 +263,53 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
 });
 
 /**
+ * GET /api/internal/events/:slug/stats
+ *
+ * Service-auth guest stats for one event, so headless agents (clau) can answer
+ * "cuántos accesos llevamos" without dashboard access. Returns totals and a
+ * per-tier breakdown (tier null groups as "none").
+ *
+ * Response: { event: {id, slug, name, date_label},
+ *             total, checked_in, email_sent,
+ *             by_tier: { RSVP: {total, checked_in}, GA: {...}, ... } }
+ */
+router.get('/events/:slug/stats', requireServiceAuth, async (req, res) => {
+  const { data: event, error: evErr } = await supabase
+    .from('events')
+    .select('id, slug, name, date_label')
+    .eq('slug', req.params.slug)
+    .single();
+  if (evErr || !event) return res.status(404).json({ error: 'Event not found' });
+
+  // Paginate past PostgREST's 1000-row default cap.
+  const rows = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('guests')
+      .select('tier, checked_in, email_sent')
+      .eq('event_id', event.id)
+      .range(from, from + PAGE - 1);
+    if (error) return res.status(500).json({ error: error.message });
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE) break;
+  }
+
+  const by_tier = {};
+  let checked_in = 0;
+  let email_sent = 0;
+  for (const g of rows) {
+    const tier = g.tier || 'none';
+    if (!by_tier[tier]) by_tier[tier] = { total: 0, checked_in: 0 };
+    by_tier[tier].total++;
+    if (g.checked_in) { by_tier[tier].checked_in++; checked_in++; }
+    if (g.email_sent) email_sent++;
+  }
+
+  res.json({ event, total: rows.length, checked_in, email_sent, by_tier });
+});
+
+/**
  * POST /api/internal/events/:slug/send-undistributed
  *
  * Headless counterpart to POST /api/events/:slug/invite-links/send-undistributed.
