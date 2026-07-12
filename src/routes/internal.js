@@ -119,7 +119,7 @@ router.post('/events/:slug/send-qr-all', requireServiceAuth, async (req, res) =>
 router.get('/events', requireServiceAuth, async (req, res) => {
   let query = supabase
     .from('events')
-    .select('id, slug, name, date_label, venue, city, published, created_at')
+    .select('id, slug, name, date, date_label, venue, city, published, created_at')
     .order('created_at', { ascending: false })
     .limit(20);
 
