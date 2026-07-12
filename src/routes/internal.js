@@ -1,9 +1,11 @@
 const { Router } = require('express');
 const crypto = require('crypto');
+const multer = require('multer');
 const { supabase } = require('../lib/supabase');
 const { createQrToken } = require('../services/qr');
 const { sendGuestQrEmail } = require('../services/email');
 const { sendUndistributedForEvent } = require('../services/undistributed');
+const { duplicateEvent } = require('../services/duplicate');
 
 const router = Router();
 
@@ -307,6 +309,126 @@ router.get('/events/:slug/stats', requireServiceAuth, async (req, res) => {
   }
 
   res.json({ event, total: rows.length, checked_in, email_sent, by_tier });
+});
+
+/**
+ * POST /api/internal/events/:slug/duplicate
+ *
+ * Headless counterpart to POST /api/events/:slug/duplicate — lets clau clone
+ * an event's settings onto a new date from WhatsApp. Same shared logic
+ * (services/duplicate.js): copies settings only, never guests/staff/links/
+ * door_token, and the copy ALWAYS starts unpublished. The new event's owner
+ * is the source event's owner.
+ *
+ * Body: { date: "YYYY-MM-DD" (required), slug?, name? }
+ */
+router.post('/events/:slug/duplicate', requireServiceAuth, async (req, res) => {
+  const { data: src, error: srcErr } = await supabase
+    .from('events')
+    .select('*')
+    .eq('slug', req.params.slug)
+    .single();
+  if (srcErr || !src) return res.status(404).json({ error: 'Event not found' });
+
+  const body = req.body || {};
+  const result = await duplicateEvent(src, String(body.date || '').trim(), {
+    slug: body.slug,
+    name: body.name,
+  });
+  if (result.error) {
+    return res.status(result.status).json({ error: result.error, slug: result.slug });
+  }
+  res.status(201).json(result.data);
+});
+
+// Flyer uploads: same constraints as the dashboard's /api/upload.
+const BANNER_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+const BANNER_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+const bannerUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (BANNER_MIMES.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Only JPEG, PNG, WebP, and GIF images are allowed'));
+  },
+});
+function handleBannerUpload(req, res, next) {
+  bannerUpload.single('image')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    next();
+  });
+}
+
+/**
+ * POST /api/internal/events/:slug/banner
+ *
+ * Headless flyer upload: multipart form with an `image` field (≤5MB,
+ * jpeg/png/webp/gif). Stores it in the event-images bucket and sets the
+ * event's banner_url in one step. Returns { url, slug }.
+ */
+router.post('/events/:slug/banner', requireServiceAuth, handleBannerUpload, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No image file provided (field: image)' });
+
+  const { data: event, error: evErr } = await supabase
+    .from('events')
+    .select('id, slug')
+    .eq('slug', req.params.slug)
+    .single();
+  if (evErr || !event) return res.status(404).json({ error: 'Event not found' });
+
+  const ext = BANNER_EXT[req.file.mimetype] || 'bin';
+  const hash = crypto.randomBytes(4).toString('hex');
+  const filename = `internal/${event.slug}/${Date.now()}-${hash}.${ext}`;
+
+  const { error: upErr } = await supabase.storage
+    .from('event-images')
+    .upload(filename, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
+  if (upErr) return res.status(500).json({ error: 'Upload failed: ' + upErr.message });
+
+  const { data: pub } = supabase.storage.from('event-images').getPublicUrl(filename);
+  const url = pub.publicUrl;
+
+  const { error: updErr } = await supabase
+    .from('events')
+    .update({ banner_url: url, updated_at: new Date().toISOString() })
+    .eq('id', event.id);
+  if (updErr) return res.status(500).json({ error: updErr.message });
+
+  res.json({ url, slug: event.slug });
+});
+
+/**
+ * POST /api/internal/events/:slug/publish
+ *
+ * Flip published on/off — nothing else. Deliberately NOT a general update
+ * endpoint: the agent's write surface on events stays limited to
+ * duplicate + banner + this switch.
+ *
+ * Body: { published: true|false } (defaults to true)
+ * Refuses to publish an event that has no banner_url — the whole point of the
+ * WhatsApp flow is that the flyer lands before the event goes live.
+ */
+router.post('/events/:slug/publish', requireServiceAuth, async (req, res) => {
+  const published = req.body && req.body.published === false ? false : true;
+
+  const { data: event, error: evErr } = await supabase
+    .from('events')
+    .select('id, slug, name, banner_url, published')
+    .eq('slug', req.params.slug)
+    .single();
+  if (evErr || !event) return res.status(404).json({ error: 'Event not found' });
+
+  if (published && !event.banner_url) {
+    return res.status(422).json({ error: 'Event has no flyer (banner_url) — upload one before publishing' });
+  }
+
+  const { error } = await supabase
+    .from('events')
+    .update({ published, updated_at: new Date().toISOString() })
+    .eq('id', event.id);
+  if (error) return res.status(500).json({ error: error.message });
+
+  res.json({ slug: event.slug, name: event.name, published });
 });
 
 /**
