@@ -231,6 +231,11 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
         added_by: req.user.id,
         qr_token: createQrToken(extraId, req.event.id),
         group_id: groupId,
+        // Must be set explicitly, not left to the column default: primaries and
+        // extras go in as ONE insert, and PostgREST fills a key that's missing
+        // from some rows with NULL rather than the default — which trips the
+        // NOT NULL constraint and fails the whole batch.
+        is_group_primary: false,
       });
     }
   }
