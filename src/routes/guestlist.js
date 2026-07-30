@@ -3,11 +3,27 @@ const { supabase } = require('../lib/supabase');
 const { requireAuth, requireEventAccess } = require('../middleware/auth');
 const { createQrToken, generateQrBuffer } = require('../services/qr');
 const { sendGuestQrEmail } = require('../services/email');
-const { loadClaimEvent, sendInvite } = require('../services/claim');
+const { loadClaimEvent, sendInvite, sendInviteBulk } = require('../services/claim');
 const { normalizeNfcId } = require('../lib/nfc');
 const JSZip = require('jszip');
 
 const router = Router({ mergeParams: true });
+
+/**
+ * Guard: on an event running the two-step claim flow, the direct-QR paths
+ * would mail the codes immediately and skip the confirm step entirely —
+ * silently breaking the whole mechanic (and, at 2000 recipients, unfixably).
+ * Returns true when the caller must NOT use the direct path.
+ */
+async function claimFlowActive(eventId) {
+  const { data } = await supabase
+    .from('events').select('claim_flow').eq('id', eventId).single();
+  return !!(data && data.claim_flow && data.claim_flow.enabled !== false);
+}
+
+const CLAIM_GUARD_MSG =
+  'Este evento usa el flujo de confirmación en dos pasos. Usa "Enviar invitaciones" ' +
+  '(el QR se manda solo cuando el invitado confirma), no el envío directo de QR.';
 
 // List guests (owner or staff)
 router.get('/', requireAuth, requireEventAccess(['owner', 'staff', 'door']), async (req, res) => {
@@ -132,8 +148,13 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
     }
   }
 
-  // Send email with ALL QR codes (primary + extras)
-  if (send_email && guest.email) {
+  // Send email with ALL QR codes (primary + extras).
+  // Suppressed on claim-flow events — the QRs only go out after the guest
+  // confirms, so mailing them here would bypass the mechanic.
+  const claimActive = await claimFlowActive(req.event.id);
+  if (send_email && guest.email && claimActive) {
+    guest.claim_flow_notice = CLAIM_GUARD_MSG;
+  } else if (send_email && guest.email) {
     try {
       const { data: event } = await supabase
         .from('events')
@@ -168,16 +189,22 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
     return res.status(400).json({ error: 'Maximum 500 guests per batch' });
   }
 
-  // Build all rows including +N extras
+  const { randomUUID } = require('crypto');
+
+  // Row IDs are generated HERE rather than by the database, so qr_token can be
+  // signed before the insert. The old flow inserted first and then issued one
+  // UPDATE per row to backfill the token — at 500 guests with +1 that was 1000
+  // sequential round trips per batch, minutes of wall clock, and a timeout.
   const allRows = [];
-  const groupMap = []; // track which primary index maps to which extras
 
   for (let i = 0; i < guestList.length; i++) {
     const g = guestList[i];
     const plusN = Math.min(parseInt(g.plus) || 0, 50);
-    const groupId = plusN > 0 ? require('crypto').randomUUID() : null;
+    const groupId = plusN > 0 ? randomUUID() : null;
 
+    const primaryId = randomUUID();
     allRows.push({
+      id: primaryId,
       event_id: req.event.id,
       name: g.name,
       email: g.email || null,
@@ -185,14 +212,14 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
       notes: g.notes || null,
       tier: g.tier || null,
       added_by: req.user.id,
-      qr_token: createQrToken(g.name + Date.now() + i, req.event.id),
+      qr_token: createQrToken(primaryId, req.event.id),
       group_id: groupId,
-      _isPrimary: true,
-      _groupId: groupId,
     });
 
     for (let j = 1; j <= plusN; j++) {
+      const extraId = randomUUID();
       allRows.push({
+        id: extraId,
         event_id: req.event.id,
         name: `${g.name} (+${j})`,
         email: null,
@@ -200,32 +227,28 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
         notes: `Acceso extra de ${g.name}`,
         tier: g.tier || null,
         added_by: req.user.id,
-        qr_token: createQrToken(`extra-${i}-${j}-${Date.now()}`, req.event.id),
+        qr_token: createQrToken(extraId, req.event.id),
         group_id: groupId,
-        _isPrimary: false,
-        _groupId: groupId,
       });
     }
   }
 
-  // Strip internal fields before insert
-  const dbRows = allRows.map(({ _isPrimary, _groupId, ...row }) => row);
-
   const { data: inserted, error } = await supabase
     .from('guests')
-    .insert(dbRows)
-    .select();
+    .insert(allRows)
+    .select('id, name, email, tier, group_id, qr_token, short_code');
 
   if (error) return res.status(500).json({ error: error.message });
 
-  // Update tokens with real guest IDs
-  for (const guest of inserted) {
-    const finalToken = createQrToken(guest.id, req.event.id);
-    await supabase
-      .from('guests')
-      .update({ qr_token: finalToken })
-      .eq('id', guest.id);
-    guest.qr_token = finalToken;
+  // Direct-QR sending is meaningless on a claim-flow event — the codes are
+  // issued on confirmation, not at import. Report it instead of silently
+  // mailing 2000 people their QRs and skipping the mechanic.
+  if (send_emails && await claimFlowActive(req.event.id)) {
+    return res.status(201).json({
+      added: inserted.length,
+      emails_sent: 0,
+      notice: CLAIM_GUARD_MSG,
+    });
   }
 
   // Send emails if requested — group extras with their primary
@@ -323,6 +346,7 @@ router.post('/:guestId/send-qr', requireAuth, requireEventAccess(['owner', 'staf
 
   if (gErr || !guest) return res.status(404).json({ error: 'Guest not found' });
   if (!guest.email) return res.status(400).json({ error: 'Guest has no email address' });
+  if (await claimFlowActive(req.event.id)) return res.status(422).json({ error: CLAIM_GUARD_MSG });
 
   const { data: event } = await supabase
     .from('events')
@@ -355,6 +379,8 @@ router.post('/:guestId/send-qr', requireAuth, requireEventAccess(['owner', 'staf
 
 // Send QR to all guests who haven't received it
 router.post('/send-all', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
+  if (await claimFlowActive(req.event.id)) return res.status(422).json({ error: CLAIM_GUARD_MSG });
+
   const { data: guests } = await supabase
     .from('guests')
     .select('*')
@@ -439,34 +465,45 @@ router.post('/send-claim-all', requireAuth, requireEventAccess(['owner', 'staff'
 
   const resendAll = req.query.resend === 'all' || req.body?.resend === 'all';
 
-  let q = supabase
-    .from('guests')
-    .select('*')
-    .eq('event_id', req.event.id)
-    .not('email', 'is', null)
-    .is('claimed_at', null);
+  // Page through — Supabase caps a single select at 1000 rows, and this list
+  // is expected to be a couple of thousand.
+  const guests = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    let q = supabase
+      .from('guests')
+      .select('id, name, email, group_id')
+      .eq('event_id', req.event.id)
+      .not('email', 'is', null)
+      .is('claimed_at', null)
+      .order('created_at', { ascending: true })
+      .range(from, from + PAGE - 1);
 
-  if (!resendAll) q = q.is('claim_sent_at', null);
+    if (!resendAll) q = q.is('claim_sent_at', null);
 
-  const { data: guests, error } = await q;
-  if (error) return res.status(500).json({ error: error.message });
-  if (!guests || guests.length === 0) {
-    return res.json({ sent: 0, failed: 0, message: 'No hay invitados pendientes de enviar' });
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    guests.push(...(data || []));
+    if (!data || data.length < PAGE) break;
   }
 
-  let sent = 0;
-  const failures = [];
-  for (const guest of guests) {
-    try {
-      await sendInvite({ guest, event, cfg });
-      sent++;
-    } catch (e) {
-      console.error(`Claim invite failed for ${guest.email}:`, e.message);
-      failures.push({ email: guest.email, error: e.message });
-    }
+  if (guests.length === 0) {
+    return res.json({ sent: 0, failed: 0, total: 0, message: 'No hay invitados pendientes de enviar' });
   }
 
-  res.json({ sent, failed: failures.length, total: guests.length, failures: failures.slice(0, 20) });
+  try {
+    const result = await sendInviteBulk({ guests, event, cfg });
+    res.json({
+      sent: result.sent,
+      failed: result.failed,
+      total: guests.length,
+      expires_at: result.expires_at,
+      failures: result.failures.slice(0, 25),
+    });
+  } catch (e) {
+    console.error('send-claim-all failed:', e.message);
+    res.status(500).json({ error: 'Failed to send invites: ' + e.message });
+  }
 });
 
 // Claim-flow progress for the dashboard.

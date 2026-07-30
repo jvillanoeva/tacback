@@ -454,10 +454,12 @@ function claimShell(cfg, c, inner, artUrl) {
 }
 
 /**
- * Mail 1 — "fuiste seleccionado", with the single-use confirm button.
- * Caller is responsible for having minted guest.claim_token first.
+ * Build (but don't send) mail 1. Split out from the sender so a 2000-guest
+ * blast can go through Resend's batch endpoint (100 messages per call)
+ * instead of 2000 individual requests against a 5 req/s limit.
+ * Mail 1 has no attachments, which is what makes it batch-eligible.
  */
-async function sendClaimInviteEmail({ guest, event, cfg, confirmUrl }) {
+function buildClaimInviteEmail({ guest, event, cfg, confirmUrl }) {
   if (!guest.email) throw new Error('Guest has no email address');
   const c = claimBrand(cfg);
   const inv = (cfg && cfg.invite) || {};
@@ -506,15 +508,96 @@ async function sendClaimInviteEmail({ guest, event, cfg, confirmUrl }) {
         ${claimTermsRow(cfg, c)}
   `;
 
-  const { data, error } = await getResend().emails.send({
+  return {
     from: cfg.from || process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@tac.colectivo.live>',
     to: guest.email,
     subject: (cfg.invite && cfg.invite.subject) || `Fuiste seleccionado — ${event.name}`,
     html: claimShell(cfg, c, inner, claimArtUrl(cfg, event, 'invite')),
-  });
+  };
+}
 
+/** Mail 1, single send. */
+async function sendClaimInviteEmail({ guest, event, cfg, confirmUrl }) {
+  const { data, error } = await getResend().emails.send(
+    buildClaimInviteEmail({ guest, event, cfg, confirmUrl })
+  );
   if (error) throw error;
   return data;
+}
+
+const BATCH_SIZE = 100;      // Resend: "Trigger up to 100 batch emails at once"
+const BATCH_PAUSE_MS = 300;  // Resend default is 5 req/s per team; 300ms keeps
+                             // every 1s window at 4 or under, including the
+                             // per-message fallback loop below.
+const MAX_CONSECUTIVE_BATCH_FAILURES = 3;
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Mail 1, bulk. `items` is [{ guest, event, cfg, confirmUrl }].
+ * Returns { sent, failed, failures[] }. A batch that errors is retried once
+ * message-by-message so one bad address can't sink the other 99.
+ */
+async function sendClaimInviteBatch(items, { onProgress } = {}) {
+  const resend = getResend();
+  let sent = 0;
+  let consecutiveBatchFailures = 0;
+  let aborted = null;
+  const failures = [];
+
+  for (let i = 0; i < items.length; i += BATCH_SIZE) {
+    const slice = items.slice(i, i + BATCH_SIZE);
+
+    let payloads;
+    try {
+      payloads = slice.map(buildClaimInviteEmail);
+    } catch (e) {
+      slice.forEach(it => failures.push({ email: it.guest.email, error: e.message }));
+      continue;
+    }
+
+    try {
+      const { error } = await resend.batch.send(payloads);
+      if (error) throw error;
+      sent += payloads.length;
+      consecutiveBatchFailures = 0;
+    } catch (batchErr) {
+      consecutiveBatchFailures++;
+      console.error('Batch send failed, falling back to per-message:', batchErr.message);
+
+      // Whole batches failing back to back means something systemic (bad key,
+      // suspended domain, rate ceiling) — not one bad address. Grinding
+      // through thousands of one-by-one retries would just hang the request
+      // until it times out, so stop and report what actually went out.
+      if (consecutiveBatchFailures >= MAX_CONSECUTIVE_BATCH_FAILURES) {
+        aborted = `Envío detenido tras ${consecutiveBatchFailures} lotes fallidos seguidos: ${batchErr.message}`;
+        for (const it of items.slice(i)) {
+          failures.push({ email: it.guest.email, error: 'no enviado (envío detenido)' });
+        }
+        break;
+      }
+
+      // Space the retry off the just-failed batch call so the two don't land
+      // inside the same rate-limit window.
+      await sleep(BATCH_PAUSE_MS);
+
+      for (let k = 0; k < slice.length; k++) {
+        try {
+          const { error } = await resend.emails.send(payloads[k]);
+          if (error) throw error;
+          sent++;
+        } catch (one) {
+          failures.push({ email: slice[k].guest.email, error: one.message });
+        }
+        await sleep(BATCH_PAUSE_MS);
+      }
+    }
+
+    if (onProgress) onProgress({ sent, failed: failures.length, total: items.length });
+    if (i + BATCH_SIZE < items.length) await sleep(BATCH_PAUSE_MS);
+  }
+
+  return { sent, failed: failures.length, failures, aborted };
 }
 
 /**
@@ -744,5 +827,6 @@ module.exports = {
   sendStaffInviteEmail,
   sendManagerQrBundle,
   sendClaimInviteEmail,
+  sendClaimInviteBatch,
   sendClaimTicketsEmail,
 };

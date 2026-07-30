@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const { supabase } = require('../lib/supabase');
-const { sendClaimInviteEmail, sendClaimTicketsEmail } = require('./email');
+const { sendClaimInviteEmail, sendClaimInviteBatch, sendClaimTicketsEmail } = require('./email');
 
 /**
  * Two-step claim flow — shared logic between the operator-facing guestlist
@@ -99,6 +99,49 @@ async function sendInvite({ guest, event, cfg }) {
 }
 
 /**
+ * Mail 1, bulk. Built for thousands of invitees:
+ *   - all tokens minted in ONE round trip (claim_mint_tokens RPC)
+ *   - all mails sent through Resend's batch endpoint, 100 per call
+ * A 2000-guest blast is ~20 API calls / a few seconds, versus 2000 calls
+ * over 7+ minutes the naive way (which times out the request).
+ *
+ * Tokens are written BEFORE any mail goes out, same invariant as sendInvite:
+ * a live token with no email is recoverable, the reverse is not.
+ */
+async function sendInviteBulk({ guests, event, cfg, onProgress }) {
+  const withEmail = (guests || []).filter(g => g.email);
+  if (!withEmail.length) return { sent: 0, failed: 0, failures: [], minted: 0 };
+
+  const ttlHours = Number(cfg.ttl_hours) > 0 ? Number(cfg.ttl_hours) : 24;
+  const expiresAt = new Date(Date.now() + ttlHours * 3600 * 1000).toISOString();
+
+  const minted = withEmail.map(g => ({ id: g.id, token: mintToken(), expires_at: expiresAt }));
+
+  const { data: mintedCount, error: mintErr } = await supabase
+    .rpc('claim_mint_tokens', { p_rows: minted });
+  if (mintErr) throw new Error('Could not mint claim tokens: ' + mintErr.message);
+
+  const byId = new Map(minted.map(m => [m.id, m.token]));
+  const items = withEmail.map(g => ({
+    guest: g,
+    event,
+    cfg,
+    confirmUrl: confirmUrlFor(cfg, byId.get(g.id)),
+  }));
+
+  const result = await sendClaimInviteBatch(items, { onProgress });
+
+  // Mark the ones that actually went out.
+  const failedEmails = new Set(result.failures.map(f => f.email));
+  const okIds = withEmail.filter(g => !failedEmails.has(g.email)).map(g => g.id);
+  for (let i = 0; i < okIds.length; i += 500) {
+    await supabase.from('guests').update({ email_sent: true }).in('id', okIds.slice(i, i + 500));
+  }
+
+  return { ...result, minted: mintedCount ?? minted.length, expires_at: expiresAt };
+}
+
+/**
  * Mail 2. Loads the guest's group so "+1 acompañante" renders as 2 QRs.
  * Called only after claim_guest_access() has already burned the token.
  */
@@ -140,6 +183,7 @@ module.exports = {
   EVENT_FIELDS,
   loadClaimEvent,
   sendInvite,
+  sendInviteBulk,
   deliverTickets,
   confirmUrlFor,
   mintToken,
