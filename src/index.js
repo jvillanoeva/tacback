@@ -15,6 +15,7 @@ const orgsRouter = require('./routes/orgs');
 const ssRouter = require('./routes/ss');
 const loyaltyRouter = require('./routes/loyalty');
 const internalRouter = require('./routes/internal');
+const claimRouter = require('./routes/claim');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -53,6 +54,7 @@ app.use('/api/orgs', orgsRouter);
 app.use('/api/ss', ssRouter);
 app.use('/api/loyalty', loyaltyRouter);
 app.use('/api/internal', internalRouter);
+app.use('/api/claim', claimRouter); // public — guest-facing confirm link
 
 // 404
 app.use((req, res) => {

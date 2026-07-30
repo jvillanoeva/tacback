@@ -372,6 +372,212 @@ async function sendGuestQrEmail({ guest, event, extraGuests = [] }) {
   return data;
 }
 
+/* ------------------------------------------------------------------ *
+ * Two-step claim flow ("fuiste seleccionado" → confirm → QRs)
+ *
+ * Mail 1 (invite) carries a single-use link valid `ttl_hours`. Clicking it
+ * burns the token server-side and fires Mail 2 (tickets). All copy, colours
+ * and links live in `events.claim_flow` so the templates stay event-agnostic
+ * — same idea as rsvp_promo above.
+ * ------------------------------------------------------------------ */
+
+/** Escape nothing — copy is operator-authored and may contain intentional <a>. */
+function paras(text, style) {
+  return String(text || '')
+    .split(/\n\s*\n/).map(s => s.trim()).filter(Boolean)
+    .map(p => `<p style="${style}">${p.replace(/\n/g, '<br>')}</p>`)
+    .join('');
+}
+
+function claimBrand(cfg) {
+  const b = (cfg && cfg.brand) || {};
+  return {
+    bg: b.bg || '#000000',
+    panel: b.panel || '#0a0a0a',
+    ink: b.ink || '#ffffff',
+    muted: b.muted || '#b9b9b9',
+    accent: b.accent || '#2fe6c4',
+    accent2: b.accent2 || '#ff2d78',
+    font: b.font || "'Helvetica Neue',Helvetica,Arial,sans-serif",
+  };
+}
+
+function claimTermsRow(cfg, c) {
+  if (!cfg.terms_url) return '';
+  return `
+        <tr><td align="center" style="padding:26px 28px 0;">
+          <div style="color:${c.muted}; font-size:12px; line-height:1.6;">
+            Consulta aquí
+            <a href="${cfg.terms_url}" style="color:${c.accent}; font-weight:700; text-decoration:underline;">${cfg.terms_label || 'Términos y Condiciones'}</a>
+          </div>
+        </td></tr>`;
+}
+
+/**
+ * Which artwork tops a given mail. Per-mail override wins, then the flow-wide
+ * art, then the event banner. Set the per-mail value to '' to suppress it
+ * (mail 2 often doesn't want to repeat a full-height flyer).
+ */
+function claimArtUrl(cfg, event, section) {
+  const s = (cfg && cfg[section]) || {};
+  if (s.art_url !== undefined) return s.art_url || '';
+  if (cfg && cfg.art_url !== undefined) return cfg.art_url || '';
+  return (event && event.banner_url) || '';
+}
+
+function claimShell(cfg, c, inner, artUrl) {
+  const art = artUrl
+    ? `<tr><td style="padding:0;">
+         <img src="${artUrl}" alt="" width="560" style="width:100%; display:block; border:0;">
+       </td></tr>`
+    : '';
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0; padding:0; background:${c.bg};">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:${c.bg};">
+    <tr><td align="center" style="padding:0;">
+      <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px; width:100%; background:${c.panel}; font-family:${c.font}; color:${c.ink};">
+        ${art}
+        ${inner}
+        <tr><td style="padding:30px 28px 0;">
+          <div style="height:2px; background:linear-gradient(90deg, ${c.accent}, ${c.accent2});"></div>
+        </td></tr>
+        <tr><td align="center" style="padding:16px 24px 28px;">
+          <span style="color:#3a3a3a; font-size:9px; letter-spacing:3px; text-transform:uppercase;">tac.colectivo.live</span>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+/**
+ * Mail 1 — "fuiste seleccionado", with the single-use confirm button.
+ * Caller is responsible for having minted guest.claim_token first.
+ */
+async function sendClaimInviteEmail({ guest, event, cfg, confirmUrl }) {
+  if (!guest.email) throw new Error('Guest has no email address');
+  const c = claimBrand(cfg);
+  const inv = (cfg && cfg.invite) || {};
+
+  const inner = `
+        ${inv.body_es ? `
+        <tr><td style="padding:30px 28px 0;">
+          ${paras(inv.body_es, `margin:0 0 14px; font-size:15px; line-height:1.6; font-weight:500; color:${c.ink};`)}
+        </td></tr>` : ''}
+
+        ${inv.date_line ? `
+        <tr><td align="center" style="padding:22px 28px 0;">
+          <span style="display:inline-block; padding:9px 24px; border-radius:999px; background:linear-gradient(90deg, ${c.accent}, ${c.accent2}); color:#000000; font-weight:800; font-size:15px; letter-spacing:2px; text-transform:uppercase;">${inv.date_line}</span>
+        </td></tr>` : ''}
+
+        ${inv.lead_es ? `
+        <tr><td align="center" style="padding:26px 28px 0;">
+          <div style="font-size:15px; line-height:1.6; font-weight:700; color:${c.ink};">${inv.lead_es}</div>
+        </td></tr>` : ''}
+
+        ${inv.warn_es ? `
+        <tr><td style="padding:18px 28px 0;">
+          <table width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td style="border:1.5px solid ${c.accent}; border-radius:12px; padding:14px 18px;">
+              <div style="color:${c.ink}; font-size:13px; line-height:1.6; font-weight:600; text-align:center;">${inv.warn_es}</div>
+            </td>
+          </tr></table>
+        </td></tr>` : ''}
+
+        <tr><td align="center" style="padding:28px 28px 0;">
+          <table cellpadding="0" cellspacing="0"><tr>
+            <td align="center" style="background:${c.accent}; border-radius:999px;">
+              <a href="${confirmUrl}" style="display:inline-block; padding:16px 40px; color:#000000; font-size:15px; font-weight:800; letter-spacing:2px; text-transform:uppercase; text-decoration:none;">${inv.cta || 'Confirma tus accesos'}</a>
+            </td>
+          </tr></table>
+        </td></tr>
+        <tr><td align="center" style="padding:12px 28px 0;">
+          <a href="${confirmUrl}" style="color:#7d7d7d; font-size:11px; text-decoration:underline; word-break:break-all;">Si el botón no funciona, abre este link</a>
+        </td></tr>
+
+        ${inv.after_es ? `
+        <tr><td style="padding:26px 28px 0;">
+          ${paras(inv.after_es, `margin:0 0 12px; font-size:13px; line-height:1.6; font-weight:500; color:${c.muted}; text-align:center;`)}
+        </td></tr>` : ''}
+
+        ${claimTermsRow(cfg, c)}
+  `;
+
+  const { data, error } = await getResend().emails.send({
+    from: cfg.from || process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@tac.colectivo.live>',
+    to: guest.email,
+    subject: (cfg.invite && cfg.invite.subject) || `Fuiste seleccionado — ${event.name}`,
+    html: claimShell(cfg, c, inner, claimArtUrl(cfg, event, 'invite')),
+  });
+
+  if (error) throw error;
+  return data;
+}
+
+/**
+ * Mail 2 — the actual accesses. Renders one QR per pass (primary + group
+ * extras), so "+1 acompañante" comes out as 2 QRs without special-casing.
+ */
+async function sendClaimTicketsEmail({ guest, event, cfg, extraGuests = [] }) {
+  if (!guest.email) throw new Error('Guest has no email address');
+  const c = claimBrand(cfg);
+  const t = (cfg && cfg.tickets) || {};
+
+  const passes = [guest, ...extraGuests];
+  const items = [];
+  for (const p of passes) {
+    items.push({ name: p.name, url: await uploadQrImage(p.short_code || p.qr_token, p.id) });
+  }
+
+  const qrBlocks = items.map((it, i) => `
+        <tr><td align="center" style="padding:${i === 0 ? '26' : '4'}px 24px 0;">
+          <div style="color:${c.muted}; font-size:11px; text-transform:uppercase; letter-spacing:3px; margin-bottom:10px; font-weight:700;">Acceso ${i + 1} / ${items.length}</div>
+          <div style="background:#ffffff; border-radius:14px; padding:14px; display:inline-block;">
+            <a href="${it.url}" style="text-decoration:none;"><img src="${it.url}" alt="Codigo QR" width="200" height="200" style="display:block;"></a>
+          </div>
+        </td></tr>
+        <tr><td align="center" style="padding:8px 24px 18px;">
+          <a href="${it.url}" style="color:#7d7d7d; font-size:10px; text-decoration:underline; letter-spacing:1px;">Si el QR no aparece, click aqui</a>
+        </td></tr>`).join('');
+
+  const infoRows = (Array.isArray(t.info) ? t.info : [])
+    .map(line => `<p style="margin:0 0 10px; font-size:13px; line-height:1.6; font-weight:600; color:${c.ink};">${line}</p>`)
+    .join('');
+
+  const inner = `
+        ${t.intro_es ? `
+        <tr><td align="center" style="padding:30px 28px 0;">
+          <div style="font-size:15px; line-height:1.6; font-weight:700; color:${c.ink};">${t.intro_es}</div>
+        </td></tr>` : ''}
+
+        ${qrBlocks}
+
+        ${infoRows ? `
+        <tr><td style="padding:6px 28px 0;">
+          <table width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td style="border:1.5px solid ${c.accent}; border-radius:12px; padding:16px 18px 6px;">
+              ${infoRows}
+            </td>
+          </tr></table>
+        </td></tr>` : ''}
+
+        ${claimTermsRow(cfg, c)}
+  `;
+
+  const { data, error } = await getResend().emails.send({
+    from: cfg.from || process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@tac.colectivo.live>',
+    to: guest.email,
+    subject: (cfg.tickets && cfg.tickets.subject) || `Listos tus accesos — ${event.name}`,
+    html: claimShell(cfg, c, inner, claimArtUrl(cfg, event, 'tickets')),
+  });
+
+  if (error) throw error;
+  return data;
+}
+
 /**
  * Send a staff invitation email.
  */
@@ -533,4 +739,10 @@ async function sendManagerQrBundle({ managerEmail, managerName, tableLabel, even
   return data;
 }
 
-module.exports = { sendGuestQrEmail, sendStaffInviteEmail, sendManagerQrBundle };
+module.exports = {
+  sendGuestQrEmail,
+  sendStaffInviteEmail,
+  sendManagerQrBundle,
+  sendClaimInviteEmail,
+  sendClaimTicketsEmail,
+};

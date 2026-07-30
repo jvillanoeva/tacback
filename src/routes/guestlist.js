@@ -3,6 +3,7 @@ const { supabase } = require('../lib/supabase');
 const { requireAuth, requireEventAccess } = require('../middleware/auth');
 const { createQrToken, generateQrBuffer } = require('../services/qr');
 const { sendGuestQrEmail } = require('../services/email');
+const { loadClaimEvent, sendInvite } = require('../services/claim');
 const { normalizeNfcId } = require('../lib/nfc');
 const JSZip = require('jszip');
 
@@ -396,6 +397,100 @@ router.post('/send-all', requireAuth, requireEventAccess(['owner', 'staff']), as
   }
 
   res.json({ sent, total: guests.length });
+});
+
+// --- Two-step claim flow: send mail 1 ("fuiste seleccionado") -------------
+// The QR mail is NOT sent here; it fires when the guest clicks the link.
+
+// Send/re-send the confirm invite to one guest. Re-sending rotates the token,
+// which kills any older link and restarts the TTL window — this is also the
+// "reactivate an expired invite" path.
+router.post('/:guestId/send-claim', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
+  const { data: guest, error: gErr } = await supabase
+    .from('guests')
+    .select('*')
+    .eq('id', req.params.guestId)
+    .eq('event_id', req.event.id)
+    .single();
+
+  if (gErr || !guest) return res.status(404).json({ error: 'Guest not found' });
+  if (!guest.email) return res.status(400).json({ error: 'Guest has no email address' });
+
+  try {
+    const { event, cfg } = await loadClaimEvent(req.event.id);
+    const out = await sendInvite({ guest, event, cfg });
+    res.json({ success: true, expires_at: out.expires_at });
+  } catch (e) {
+    if (e.code === 'CLAIM_DISABLED') return res.status(422).json({ error: e.message });
+    res.status(500).json({ error: 'Failed to send invite: ' + e.message });
+  }
+});
+
+// Send the confirm invite to everyone who hasn't had one yet.
+// Only primaries (a guest with an email); +N extras ride along on mail 2.
+// `?resend=all` re-sends to everyone who still hasn't confirmed.
+router.post('/send-claim-all', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
+  let event, cfg;
+  try {
+    ({ event, cfg } = await loadClaimEvent(req.event.id));
+  } catch (e) {
+    return res.status(422).json({ error: e.message });
+  }
+
+  const resendAll = req.query.resend === 'all' || req.body?.resend === 'all';
+
+  let q = supabase
+    .from('guests')
+    .select('*')
+    .eq('event_id', req.event.id)
+    .not('email', 'is', null)
+    .is('claimed_at', null);
+
+  if (!resendAll) q = q.is('claim_sent_at', null);
+
+  const { data: guests, error } = await q;
+  if (error) return res.status(500).json({ error: error.message });
+  if (!guests || guests.length === 0) {
+    return res.json({ sent: 0, failed: 0, message: 'No hay invitados pendientes de enviar' });
+  }
+
+  let sent = 0;
+  const failures = [];
+  for (const guest of guests) {
+    try {
+      await sendInvite({ guest, event, cfg });
+      sent++;
+    } catch (e) {
+      console.error(`Claim invite failed for ${guest.email}:`, e.message);
+      failures.push({ email: guest.email, error: e.message });
+    }
+  }
+
+  res.json({ sent, failed: failures.length, total: guests.length, failures: failures.slice(0, 20) });
+});
+
+// Claim-flow progress for the dashboard.
+router.get('/claim-status', requireAuth, requireEventAccess(['owner', 'staff', 'door']), async (req, res) => {
+  const { data, error } = await supabase
+    .from('guests')
+    .select('id, name, email, claim_sent_at, claim_expires_at, claimed_at, group_id')
+    .eq('event_id', req.event.id)
+    .not('email', 'is', null);
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  const now = Date.now();
+  const rows = data || [];
+  const stats = {
+    total: rows.length,
+    invited: rows.filter(g => g.claim_sent_at).length,
+    confirmed: rows.filter(g => g.claimed_at).length,
+    pending: rows.filter(g => g.claim_sent_at && !g.claimed_at && (!g.claim_expires_at || new Date(g.claim_expires_at).getTime() > now)).length,
+    expired: rows.filter(g => g.claim_sent_at && !g.claimed_at && g.claim_expires_at && new Date(g.claim_expires_at).getTime() <= now).length,
+    not_invited: rows.filter(g => !g.claim_sent_at).length,
+  };
+
+  res.json({ stats, guests: rows });
 });
 
 // Download a ZIP of all QR PNGs for a guest (and their group extras if any)
