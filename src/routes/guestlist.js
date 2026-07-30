@@ -25,35 +25,62 @@ const CLAIM_GUARD_MSG =
   'Este evento usa el flujo de confirmación en dos pasos. Usa "Enviar invitaciones" ' +
   '(el QR se manda solo cuando el invitado confirma), no el envío directo de QR.';
 
+const GUEST_FIELDS =
+  'id, name, email, phone, notes, tier, checked_in, checked_in_at, email_sent, ' +
+  'created_at, added_by, group_id, requested_by, industry, nfc_id';
+
 // List guests (owner or staff)
+//
+// PostgREST caps a single select at 1000 rows. This used to return that first
+// page and derive the stat cards by counting the array, so an event with more
+// passes than the cap silently reported "1000 total" and a QR count that was
+// just however many happened to fall inside the window. Page through for the
+// list, and get the stats from real COUNT queries instead of array length.
 router.get('/', requireAuth, requireEventAccess(['owner', 'staff', 'door']), async (req, res) => {
   const { search, status } = req.query;
 
-  let query = supabase
-    .from('guests')
-    .select('id, name, email, phone, notes, tier, checked_in, checked_in_at, email_sent, created_at, added_by, group_id, requested_by, industry, nfc_id')
-    .eq('event_id', req.event.id)
-    .order('created_at', { ascending: false });
+  const scoped = (sel, opts) => {
+    let q = supabase.from('guests').select(sel, opts).eq('event_id', req.event.id);
+    if (search) q = q.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+    if (status === 'checked_in') q = q.eq('checked_in', true);
+    if (status === 'pending') q = q.eq('checked_in', false);
+    return q;
+  };
 
-  if (search) {
-    query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+  const PAGE = 1000;
+  const guests = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await scoped(GUEST_FIELDS)
+      .order('created_at', { ascending: false })
+      .range(from, from + PAGE - 1);
+    if (error) return res.status(500).json({ error: error.message });
+    guests.push(...(data || []));
+    if (!data || data.length < PAGE) break;
   }
 
-  if (status === 'checked_in') query = query.eq('checked_in', true);
-  if (status === 'pending') query = query.eq('checked_in', false);
+  // Stats always describe the WHOLE event, not the current search/filter —
+  // that's what the cards mean, and it's what they showed before the cap bit.
+  const countWhere = async (mod) => {
+    let q = supabase
+      .from('guests')
+      .select('id', { count: 'exact', head: true })
+      .eq('event_id', req.event.id);
+    if (mod) q = mod(q);
+    const { count, error } = await q;
+    if (error) throw new Error(error.message);
+    return count || 0;
+  };
 
-  const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
-
-  // Stats
-  const total = data?.length || 0;
-  const checkedIn = data?.filter(g => g.checked_in).length || 0;
-  const emailsSent = data?.filter(g => g.email_sent).length || 0;
-
-  res.json({
-    guests: data || [],
-    stats: { total, checked_in: checkedIn, emails_sent: emailsSent },
-  });
+  try {
+    const [total, checkedIn, emailsSent] = await Promise.all([
+      countWhere(null),
+      countWhere(q => q.eq('checked_in', true)),
+      countWhere(q => q.eq('email_sent', true)),
+    ]);
+    res.json({ guests, stats: { total, checked_in: checkedIn, emails_sent: emailsSent } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Add single guest (owner or staff) — supports +N extras
