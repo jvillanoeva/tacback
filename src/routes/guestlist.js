@@ -88,6 +88,7 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
       added_by: req.user.id,
       qr_token: createQrToken(undefined, req.event.id),
       group_id: groupId,
+      is_group_primary: true, // owns the +N group; delete cascades to its extras
     })
     .select()
     .single();
@@ -214,6 +215,7 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
       added_by: req.user.id,
       qr_token: createQrToken(primaryId, req.event.id),
       group_id: groupId,
+      is_group_primary: true, // owns the +N group; delete cascades to its extras
     });
 
     for (let j = 1; j <= plusN; j++) {
@@ -324,7 +326,28 @@ router.put('/:guestId', requireAuth, requireEventAccess(['owner', 'staff']), asy
 });
 
 // Delete guest (owner or staff)
+// Deleting the primary of a +N group also removes its extras — enforced by the
+// guests_cascade_group_delete trigger, so it holds for every delete path, not
+// just this one. Counted here only so the UI can say how many passes went.
 router.delete('/:guestId', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
+  const { data: target } = await supabase
+    .from('guests')
+    .select('id, group_id, is_group_primary')
+    .eq('id', req.params.guestId)
+    .eq('event_id', req.event.id)
+    .maybeSingle();
+
+  if (!target) return res.status(404).json({ error: 'Guest not found' });
+
+  let removed = 1;
+  if (target.group_id && target.is_group_primary) {
+    const { count } = await supabase
+      .from('guests')
+      .select('id', { count: 'exact', head: true })
+      .eq('group_id', target.group_id);
+    removed = count || 1;
+  }
+
   const { error } = await supabase
     .from('guests')
     .delete()
@@ -332,7 +355,7 @@ router.delete('/:guestId', requireAuth, requireEventAccess(['owner', 'staff']), 
     .eq('event_id', req.event.id);
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ success: true });
+  res.json({ success: true, removed });
 });
 
 // Send/resend QR email to a guest

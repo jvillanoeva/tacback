@@ -202,6 +202,7 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
       tier,
       added_by,
       group_id: groupId,
+      is_group_primary: true, // owns the +N group; delete cascades to its extras
       qr_token: createQrToken(undefined, event_id),
     })
     .select()
