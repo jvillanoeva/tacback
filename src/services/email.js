@@ -665,7 +665,10 @@ async function sendClaimTicketsEmail({ guest, event, cfg, extraGuests = [] }) {
  * Send a staff invitation email.
  */
 async function sendStaffInviteEmail({ email, role, eventName, eventSlug, hasAccount }) {
-  const webUrl = process.env.WEB_URL || 'https://tac.colectivo.live';
+  // NOT WEB_URL — that's the CORS allow-list (index.js splits it on commas),
+  // and on Railway its first entry is the apex colectivo.live, which serves no
+  // app routes. Staff invites were linking to a 404 because of it.
+  const webUrl = (process.env.PUBLIC_WEB_URL || 'https://tac.colectivo.live').replace(/\/+$/, '');
   const roleLabel = role === 'door' ? 'Puerta' : 'Staff';
   const loginUrl = hasAccount
     ? `${webUrl}/login.html`

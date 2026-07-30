@@ -44,10 +44,29 @@ function mintToken() {
   return crypto.randomBytes(32).toString('base64url');
 }
 
+const DEFAULT_CONFIRM_BASE = 'https://tac.colectivo.live/c/';
+
+/**
+ * Where the confirm link points.
+ *
+ * Deliberately does NOT read WEB_URL. That variable is a CORS allow-list
+ * (index.js splits it on commas) and on Railway its first entry is the apex
+ * `colectivo.live`, which serves no /c/ route — using it here mailed a few
+ * thousand guests a 404. Per-event `confirm_base` wins; PUBLIC_WEB_URL is the
+ * env escape hatch; otherwise the known-good host.
+ */
 function confirmUrlFor(cfg, token) {
-  const base = (cfg.confirm_base || `${process.env.WEB_URL || 'https://tac.colectivo.live'}/c/`)
-    .replace(/\/+$/, '');
-  return `${base}/${token}`;
+  let base = cfg.confirm_base;
+
+  if (!base && process.env.PUBLIC_WEB_URL) {
+    base = `${process.env.PUBLIC_WEB_URL.replace(/\/+$/, '')}/c/`;
+  }
+  if (!base) {
+    console.warn('[claim] no confirm_base on this event; defaulting to ' + DEFAULT_CONFIRM_BASE);
+    base = DEFAULT_CONFIRM_BASE;
+  }
+
+  return `${base.replace(/\/+$/, '')}/${token}`;
 }
 
 /**
