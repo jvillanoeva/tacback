@@ -1,8 +1,29 @@
 const { Router } = require('express');
 const { supabase } = require('../lib/supabase');
 const { loadClaimEvent, deliverTickets } = require('../services/claim');
+const { sendDigest } = require('../services/digest');
 
 const router = Router();
+
+/**
+ * Hourly confirmation digest, mailed to the people running the campaign.
+ *
+ * Two path segments, so it can't collide with the single-segment /:token
+ * routes below. Auth is the unguessable secret itself (43 random chars, held
+ * in events.claim_flow.digest.secret): the recipient list lives server-side
+ * and can't be influenced by the caller, and sends are rate-limited, so the
+ * worst a leaked URL buys is a duplicate mail to a fixed set of addresses.
+ */
+router.post('/digest/:secret', async (req, res) => {
+  try {
+    const r = await sendDigest(req.params.secret);
+    if (!r.ok) return res.status(r.code || 500).json({ error: r.error });
+    res.json({ ok: true, sent_to: r.sent_to, stats: r.stats });
+  } catch (e) {
+    console.error('digest failed:', e.message);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
 
 /**
  * Public, unauthenticated. Backs the /c/:token confirm page.
