@@ -16,6 +16,7 @@ const ssRouter = require('./routes/ss');
 const loyaltyRouter = require('./routes/loyalty');
 const internalRouter = require('./routes/internal');
 const claimRouter = require('./routes/claim');
+const clientRouter = require('./routes/client');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -54,7 +55,8 @@ app.use('/api/orgs', orgsRouter);
 app.use('/api/ss', ssRouter);
 app.use('/api/loyalty', loyaltyRouter);
 app.use('/api/internal', internalRouter);
-app.use('/api/claim', claimRouter); // public — guest-facing confirm link
+app.use('/api/claim', claimRouter);   // public — guest-facing confirm link
+app.use('/api/client', clientRouter); // read-only client dashboard (allowlisted)
 
 // 404
 app.use((req, res) => {
