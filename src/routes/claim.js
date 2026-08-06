@@ -2,6 +2,7 @@ const { Router } = require('express');
 const { supabase } = require('../lib/supabase');
 const { loadClaimEvent, deliverTickets } = require('../services/claim');
 const { sendDigest } = require('../services/digest');
+const { sendReminder } = require('../services/reminder');
 
 const router = Router();
 
@@ -21,6 +22,32 @@ router.post('/digest/:secret', async (req, res) => {
     res.json({ ok: true, sent_to: r.sent_to, stats: r.stats });
   } catch (e) {
     console.error('digest failed:', e.message);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * Day-of reminder to everyone already holding QRs.
+ *
+ * Same shape as the digest above — two path segments, secret-as-auth, list
+ * built server-side — with two differences that matter because this one goes
+ * to guests rather than to three colleagues:
+ *
+ *   - `{ "to": "someone@example.com" }` sends ONE test copy and nothing else.
+ *   - a real run stamps `reminder.sent_at` and refuses to run again, so a
+ *     scheduler that double-fires can't mail 700 people twice. `force: true`
+ *     overrides deliberately.
+ */
+router.post('/reminder/:secret', async (req, res) => {
+  try {
+    const r = await sendReminder(req.params.secret, {
+      to: req.body?.to,
+      force: req.body?.force === true,
+    });
+    if (!r.ok) return res.status(r.code || 500).json({ error: r.error });
+    res.json(r);
+  } catch (e) {
+    console.error('reminder failed:', e.message);
     res.status(500).json({ error: 'Internal error' });
   }
 });
