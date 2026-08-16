@@ -206,12 +206,31 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
 });
 
 // Bulk add guests (owner or staff)
+//
+// Accepts optional `default_requested_by` / `default_industry` alongside the
+// list: an imported spreadsheet is almost always one origin's guests ("these
+// 80 are from the PR agency"), so the origin is set once for the batch instead
+// of repeated on every row. A per-row value still wins when the file happens to
+// carry an "Invitado por" column.
+//
+// Without this, bulk and CSV imports wrote NULL origin for every guest while
+// only the single-add form recorded it — which is why requested_by sat at ~3%
+// populated and the per-origin report couldn't be trusted.
 router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
-  const { guests: guestList, send_emails } = req.body;
+  const { guests: guestList, send_emails, default_requested_by, default_industry } = req.body;
 
   if (!Array.isArray(guestList) || guestList.length === 0) {
     return res.status(400).json({ error: 'Provide an array of guests' });
   }
+
+  // Empty-as-null, whitespace collapsed, so blank cells in a spreadsheet don't
+  // become a distinct "" origin bucket next to the real NULLs.
+  const clean = (v) => {
+    const s = v == null ? '' : String(v).trim().replace(/\s+/g, ' ');
+    return s === '' ? null : s;
+  };
+  const batchRequestedBy = clean(default_requested_by);
+  const batchIndustry = clean(default_industry);
 
   if (guestList.length > 500) {
     return res.status(400).json({ error: 'Maximum 500 guests per batch' });
@@ -230,6 +249,10 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
     const plusN = Math.min(parseInt(g.plus) || 0, 50);
     const groupId = plusN > 0 ? randomUUID() : null;
 
+    // Per-row origin wins; otherwise fall back to the batch default.
+    const rowRequestedBy = clean(g.requested_by) || batchRequestedBy;
+    const rowIndustry = clean(g.industry) || batchIndustry;
+
     const primaryId = randomUUID();
     allRows.push({
       id: primaryId,
@@ -239,6 +262,8 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
       phone: g.phone || null,
       notes: g.notes || null,
       tier: g.tier || null,
+      requested_by: rowRequestedBy,
+      industry: rowIndustry,
       added_by: req.user.id,
       qr_token: createQrToken(primaryId, req.event.id),
       group_id: groupId,
@@ -255,6 +280,9 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
         phone: null,
         notes: `Acceso extra de ${g.name}`,
         tier: g.tier || null,
+        // Extras inherit the primary's origin — a PR guest's +1 is a PR guest.
+        requested_by: rowRequestedBy,
+        industry: rowIndustry,
         added_by: req.user.id,
         qr_token: createQrToken(extraId, req.event.id),
         group_id: groupId,
