@@ -300,6 +300,173 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
 });
 
 /**
+ * POST /api/internal/invite-links
+ *
+ * Mint one invite link (a "table") for a headless caller. Bars' table sales
+ * call this the moment a table order is fully paid: the buyer then loads their
+ * guests' names at tac.colectivo.live/invite.html?token=…, and each guest gets
+ * a QR through the existing public invite flow. TAC learns nothing about money;
+ * Bars learns nothing about guests.
+ *
+ * Body: { event_slug, label, tier?, max_guests, manager_name?, manager_email?,
+ *         external_ref? }
+ *
+ *   external_ref — the caller's own id for whatever bought this link (for Bars,
+ *   `table_orders.id`). It is the IDEMPOTENCY KEY: Stripe retries webhooks and
+ *   an operator can press "Reintentar", and every one of those must land on the
+ *   SAME link. A second link would silently split one table's quota in two and
+ *   hand the buyer a URL where half their guests don't fit.
+ *
+ * Returns 201 { created: true, ... } on a fresh link, 200 { created: false, ... }
+ * when external_ref already had one. Both carry the same { token, url }, so the
+ * caller can treat them identically.
+ *
+ * `created_by` is null: there is no user session behind a service token. The
+ * null plus external_ref is how the dashboard tells a machine-made link from a
+ * hand-made one.
+ */
+router.post('/invite-links', requireServiceAuth, async (req, res) => {
+  const body = req.body || {};
+  const clean = (v) => {
+    const s = v == null ? '' : String(v).trim().replace(/\s+/g, ' ');
+    return s === '' ? null : s;
+  };
+
+  const event_slug = clean(body.event_slug);
+  const label = clean(body.label);
+  const external_ref = clean(body.external_ref);
+  const tier = clean(body.tier);
+  const manager_name = clean(body.manager_name);
+  const manager_email = body.manager_email
+    ? String(body.manager_email).trim().toLowerCase()
+    : null;
+
+  if (!event_slug || !label) {
+    return res.status(400).json({ error: 'event_slug and label are required' });
+  }
+
+  // Same clamp as the owner-facing POST /:eventSlug/invite — a caller that
+  // sends garbage gets a usable link, not a 500 or a 500-seat one.
+  const max_guests = Math.min(Math.max(parseInt(body.max_guests, 10) || 0, 1), 500);
+
+  const webUrl = (process.env.PUBLIC_WEB_URL || 'https://tac.colectivo.live').replace(/\/+$/, '');
+  const urlFor = (token) => `${webUrl}/invite.html?token=${token}`;
+
+  const { data: event, error: evErr } = await supabase
+    .from('events')
+    .select('id, slug, name')
+    .eq('slug', event_slug)
+    .maybeSingle();
+  if (evErr) return res.status(500).json({ error: evErr.message });
+  if (!event) return res.status(404).json({ error: 'Event not found' });
+
+  // Idempotency, first pass: the link already exists.
+  if (external_ref) {
+    const { data: existing, error: exErr } = await supabase
+      .from('invite_links')
+      .select('id, token, event_id, label, tier, max_guests, used_count, active')
+      .eq('external_ref', external_ref)
+      .maybeSingle();
+    if (exErr) return res.status(500).json({ error: exErr.message });
+    if (existing) {
+      // The same reference pointing at a different event means the caller has
+      // its wires crossed. Returning the old link would be worse than saying so.
+      if (existing.event_id !== event.id) {
+        return res.status(409).json({
+          error: 'external_ref already belongs to a link on another event',
+          invite_link_id: existing.id,
+        });
+      }
+      return res.json({
+        ok: true,
+        created: false,
+        invite_link_id: existing.id,
+        token: existing.token,
+        url: urlFor(existing.token),
+        event_slug: event.slug,
+        label: existing.label,
+        max_guests: existing.max_guests,
+        used_count: existing.used_count,
+        active: existing.active,
+      });
+    }
+  }
+
+  const token = crypto.randomBytes(16).toString('base64url');
+
+  const { data: link, error: insErr } = await supabase
+    .from('invite_links')
+    .insert({
+      event_id: event.id,
+      token,
+      label,
+      tier,
+      max_guests,
+      // The buyer loads their own guest names and wants each QR to land in the
+      // guest's inbox, exactly as a sub-promoter's link does.
+      auto_send_email: body.auto_send_email !== false,
+      manager_name,
+      manager_email,
+      external_ref,
+      created_by: null,
+    })
+    .select('id, token, label, tier, max_guests, used_count, active')
+    .single();
+
+  if (insErr) {
+    // Idempotency, second pass: two webhook deliveries raced past the SELECT
+    // above and the partial unique index caught the loser. Re-read and answer
+    // with the winner's link rather than failing a retry that was correct.
+    if (insErr.code === '23505' && external_ref) {
+      const { data: winner } = await supabase
+        .from('invite_links')
+        .select('id, token, label, tier, max_guests, used_count, active')
+        .eq('external_ref', external_ref)
+        .maybeSingle();
+      if (winner) {
+        return res.json({
+          ok: true,
+          created: false,
+          invite_link_id: winner.id,
+          token: winner.token,
+          url: urlFor(winner.token),
+          event_slug: event.slug,
+          label: winner.label,
+          max_guests: winner.max_guests,
+          used_count: winner.used_count,
+          active: winner.active,
+        });
+      }
+    }
+    return res.status(500).json({ error: insErr.message });
+  }
+
+  // Same audit row the owner-facing create writes, with a null actor — the
+  // dashboard's table log should show a machine sale like any other.
+  supabase.from('table_activity').insert({
+    event_id: event.id,
+    invite_link_id: link.id,
+    label: link.label,
+    action: 'created',
+    detail: { cupo: link.max_guests, source: 'internal', external_ref },
+    actor_id: null,
+  }).then(() => {}, () => {});
+
+  res.status(201).json({
+    ok: true,
+    created: true,
+    invite_link_id: link.id,
+    token: link.token,
+    url: urlFor(link.token),
+    event_slug: event.slug,
+    label: link.label,
+    max_guests: link.max_guests,
+    used_count: link.used_count,
+    active: link.active,
+  });
+});
+
+/**
  * GET /api/internal/events/:slug/stats
  *
  * Service-auth guest stats for one event, so headless agents (clau) can answer
