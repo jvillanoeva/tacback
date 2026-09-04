@@ -375,10 +375,13 @@ router.post('/public/:token/guest', async (req, res) => {
         .eq('id', link.event_id)
         .single();
 
-      await sendGuestQrEmail({ guest, event, extraGuests: insertedExtras });
+      // Keep Resend's message id: it is the only handle a later
+      // delivered/bounced webhook has for finding this guest again, and
+      // `email_sent` on its own has never meant more than "Resend accepted it".
+      const sent = await sendGuestQrEmail({ guest, event, extraGuests: insertedExtras });
       await supabase
         .from('guests')
-        .update({ email_sent: true })
+        .update({ email_sent: true, email_message_id: (sent && sent.id) || null })
         .eq('id', guest.id);
       guest.email_sent = true;
     } catch (e) {

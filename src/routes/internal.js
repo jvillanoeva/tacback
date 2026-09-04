@@ -486,6 +486,117 @@ router.post('/invite-links', requireServiceAuth, async (req, res) => {
 });
 
 /**
+ * PATCH /api/internal/invite-links/:token
+ *
+ * Service-auth edit of a machine-created link. Today it has exactly one
+ * caller and one purpose: Bars refunds a table, and the guest list that came
+ * with it has to stop growing (`max_guests: 0, active: false`).
+ *
+ * It deliberately does NOT delete the link or its guests. People who already
+ * loaded a name hold a QR that the door has seen; revoking a stranger's
+ * access pass because the buyer got their money back is a decision for
+ * whoever is running the door, not for a webhook. What this guarantees is
+ * that nobody can add more.
+ *
+ * Only `max_guests` and `active` are settable — a service token has no
+ * business renaming a table or moving it between events.
+ */
+router.patch('/invite-links/:token', requireServiceAuth, async (req, res) => {
+  const { data: link, error: findErr } = await supabase
+    .from('invite_links')
+    .select('id, event_id, label, max_guests, used_count, active, external_ref')
+    .eq('token', req.params.token)
+    .maybeSingle();
+  if (findErr) return res.status(500).json({ error: findErr.message });
+  if (!link) return res.status(404).json({ error: 'Invite link not found' });
+
+  const update = {};
+  if (req.body && req.body.max_guests !== undefined) {
+    update.max_guests = Math.min(Math.max(parseInt(req.body.max_guests, 10) || 0, 0), 500);
+  }
+  if (req.body && req.body.active !== undefined) update.active = req.body.active === true;
+
+  if (Object.keys(update).length === 0) {
+    return res.status(400).json({ error: 'Nothing to update (max_guests, active)' });
+  }
+
+  const { data, error } = await supabase
+    .from('invite_links')
+    .update(update)
+    .eq('id', link.id)
+    .select('id, token, label, max_guests, used_count, active')
+    .single();
+  if (error) return res.status(500).json({ error: error.message });
+
+  supabase.from('table_activity').insert({
+    event_id: link.event_id,
+    invite_link_id: link.id,
+    label: link.label,
+    action: 'quota_change',
+    detail: {
+      from: link.max_guests,
+      to: data.max_guests,
+      source: 'internal',
+      external_ref: link.external_ref,
+    },
+    actor_id: null,
+  }).then(() => {}, () => {});
+
+  // `used_count` is the number that matters to whoever reads this next: it is
+  // how many passes are already out in the world and cannot be recalled here.
+  res.json({ ok: true, ...data });
+});
+
+/**
+ * POST /api/internal/email-events
+ *
+ * Delivery truth for guest QR emails, forwarded by Bars' `resend-webhook`
+ * (the project that holds the Resend keys). Bars looks a message id up
+ * against its own sends first; anything it does not recognise lands here,
+ * because `guests` is TAC's table and Bars does not write to it.
+ *
+ * Body: { message_id, type, outcome, at, reason }
+ * Returns { matched } so the caller can tell "we handled it" from "nobody
+ * owns this id" without guessing.
+ *
+ * A bounce clears `email_sent`. That is the whole point: the dashboard's
+ * "Send All QRs" skips guests already marked sent, so a guest whose QR
+ * bounced would otherwise be permanently un-resendable — invisible until
+ * they are standing at the door without a pass.
+ */
+router.post('/email-events', requireServiceAuth, async (req, res) => {
+  const body = req.body || {};
+  const messageId = body.message_id ? String(body.message_id).trim() : null;
+  const outcome = body.outcome ? String(body.outcome) : null;
+  if (!messageId || !outcome) {
+    return res.status(400).json({ error: 'message_id and outcome are required' });
+  }
+
+  const { data: guests, error: findErr } = await supabase
+    .from('guests')
+    .select('id, name, email, email_sent')
+    .eq('email_message_id', messageId);
+  if (findErr) return res.status(500).json({ error: findErr.message });
+  if (!guests || guests.length === 0) {
+    return res.json({ ok: true, matched: 0 });
+  }
+
+  const at = body.at || new Date().toISOString();
+  const update = { email_status: outcome, email_status_at: at };
+  if (outcome === 'failed' || outcome === 'bounced') {
+    update.email_status = 'bounced';
+    update.email_sent = false;
+  }
+
+  const ids = guests.map(g => g.id);
+  const { error: upErr } = await supabase.from('guests').update(update).eq('email_message_id', messageId);
+  if (upErr) return res.status(500).json({ error: upErr.message });
+
+  console.log(`[internal/email-events] ${messageId} ${outcome} → ${ids.length} guest(s)`);
+  res.json({ ok: true, matched: ids.length, outcome: update.email_status, guest_ids: ids });
+});
+
+/**
  * GET /api/internal/events/:slug/stats
  *
  * Service-auth guest stats for one event, so headless agents (clau) can answer
