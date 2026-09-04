@@ -359,7 +359,7 @@ router.post('/invite-links', requireServiceAuth, async (req, res) => {
 
   const { data: event, error: evErr } = await supabase
     .from('events')
-    .select('id, slug, name')
+    .select('id, slug, name, owner_id')
     .eq('slug', event_slug)
     .maybeSingle();
   if (evErr) return res.status(500).json({ error: evErr.message });
@@ -413,7 +413,21 @@ router.post('/invite-links', requireServiceAuth, async (req, res) => {
       manager_name,
       manager_email,
       external_ref,
-      created_by: null,
+      // The event's owner, NOT null.
+      //
+      // `guests.added_by` is `uuid NOT NULL REFERENCES auth.users`, and the
+      // public invite route copies it straight off `invite_links.created_by`.
+      // A link created with a null here therefore looks fine until the first
+      // guest is added, at which point the buyer sees a 500 and a constraint
+      // error. (It shipped that way on 2026-09-04: the T2 migration dropped
+      // the NOT NULL so a service token could insert, and nothing connected
+      // that to the guest insert two routes away.)
+      //
+      // The owner is the honest answer as well as a working one: these links
+      // belong to whoever owns the event, exactly like the ones created from
+      // the dashboard. Who actually bought the table is recorded where it can
+      // be read — `label`, `manager_name`/`manager_email`, and `external_ref`.
+      created_by: event.owner_id,
     })
     .select('id, token, label, tier, max_guests, used_count, active')
     .single();

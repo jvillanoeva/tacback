@@ -264,6 +264,35 @@ router.post('/public/:token/guest', async (req, res) => {
     return res.status(403).json({ error: `Solo quedan ${remaining} QR${remaining > 1 ? 's' : ''} disponibles` });
   }
 
+  /**
+   * Who this guest is attributed to.
+   *
+   * `guests.added_by` is NOT NULL and references auth.users, so a link whose
+   * `created_by` is null cannot produce a guest — the insert dies on the
+   * constraint and the buyer sees a 500 halfway through loading their table.
+   * Machine-created links (Bars table sales, via POST /api/internal/invite-links)
+   * had exactly that shape for a day.
+   *
+   * The endpoint now stamps the event owner, so this is belt to that braces:
+   * any link already in the table with a null, or any future caller that
+   * forgets, falls back to the event's owner rather than failing at the last
+   * step. One extra read, and only on the links that need it.
+   */
+  let addedBy = link.created_by;
+  if (!addedBy) {
+    const { data: ev } = await supabase
+      .from('events')
+      .select('owner_id')
+      .eq('id', link.event_id)
+      .single();
+    addedBy = ev && ev.owner_id;
+    if (!addedBy) {
+      console.error(`[invite/public] link ${link.id} has no created_by and event ${link.event_id} has no owner`);
+      return res.status(500).json({ error: 'Este link no está configurado correctamente. Escríbenos y lo arreglamos.' });
+    }
+    console.warn(`[invite/public] link ${link.id} had a null created_by; attributed to event owner ${addedBy}`);
+  }
+
   // Generate group_id if there are extras
   const groupId = plusN > 0 ? require('crypto').randomUUID() : null;
 
@@ -275,7 +304,7 @@ router.post('/public/:token/guest', async (req, res) => {
       name,
       email: email || null,
       tier: link.tier || null,
-      added_by: link.created_by,
+      added_by: addedBy,
       invite_link_id: link.id,
       qr_token: createQrToken('placeholder', link.event_id),
       group_id: groupId,
@@ -309,7 +338,7 @@ router.post('/public/:token/guest', async (req, res) => {
         name: `${name} (+${i})`,
         email: null,
         tier: link.tier || null,
-        added_by: link.created_by,
+        added_by: addedBy,
         invite_link_id: link.id,
         qr_token: createQrToken(`extra-${i}-${Date.now()}`, link.event_id),
         group_id: groupId,
