@@ -350,7 +350,12 @@ router.post('/invite-links', requireServiceAuth, async (req, res) => {
   const max_guests = Math.min(Math.max(parseInt(body.max_guests, 10) || 0, 1), 500);
 
   const webUrl = (process.env.PUBLIC_WEB_URL || 'https://tac.colectivo.live').replace(/\/+$/, '');
-  const urlFor = (token) => `${webUrl}/invite.html?token=${token}`;
+  // `/invite/<token>` — the form web/vercel.json rewrites to invite.html?t=…,
+  // and the one guestlist.html hands operators. NOT `invite.html?token=`:
+  // invite.html reads `t`, finds nothing, and redirects the visitor to the TAC
+  // dashboard. (That URL shape shipped in Bars' buyer emails for a day; see
+  // TAC-pipelines.md §2, which documented it wrong.)
+  const urlFor = (token) => `${webUrl}/invite/${encodeURIComponent(token)}`;
 
   const { data: event, error: evErr } = await supabase
     .from('events')
