@@ -76,7 +76,9 @@ function publicView(event, cfg, status, extra = {}) {
       city: event.city || null,
       banner_url: cfg.art_url || event.banner_url || null,
     },
-    brand: (cfg && cfg.brand) || {},
+    // The landing can carry its own palette (landing.brand) so the emails'
+    // brand (claimBrand) and the page can diverge — e.g. green mails, dark page.
+    brand: (cfg && cfg.landing && cfg.landing.brand) || (cfg && cfg.brand) || {},
     landing,
     terms_url: (cfg && cfg.terms_url) || null,
     terms_label: (cfg && cfg.terms_label) || 'Términos y Condiciones',
