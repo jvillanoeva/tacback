@@ -461,6 +461,29 @@ function claimShell(cfg, c, inner, artUrl) {
  */
 function buildClaimInviteEmail({ guest, event, cfg, confirmUrl }) {
   if (!guest.email) throw new Error('Guest has no email address');
+
+  // Marketing-campaign variant: a full per-event HTML template stored in
+  // claim_flow.invite.custom_html, with placeholder substitution. Only
+  // events that set it take this path; everything else is byte-identical.
+  // {{CONFIRM_URL}} / {{UNSUB_URL}} / {{NAME}} are the placeholders.
+  if (cfg && cfg.invite && cfg.invite.custom_html) {
+    const { unsubUrlFor } = require('../lib/unsub');
+    const unsubUrl = unsubUrlFor(guest.email);
+    const html = String(cfg.invite.custom_html)
+      .split('{{CONFIRM_URL}}').join(confirmUrl)
+      .split('{{UNSUB_URL}}').join(unsubUrl)
+      .split('{{NAME}}').join(guest.name || '');
+    return {
+      from: cfg.from || process.env.RESEND_FROM_EMAIL || 'Colectivo <noreply@tac.colectivo.live>',
+      to: guest.email,
+      subject: (cfg.invite && cfg.invite.subject) || event.name,
+      html,
+      headers: {
+        'List-Unsubscribe': '<' + unsubUrl + '>',
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+      },
+    };
+  }
   const c = claimBrand(cfg);
   const inv = (cfg && cfg.invite) || {};
 

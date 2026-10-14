@@ -3,6 +3,7 @@ const { supabase } = require('../lib/supabase');
 const { loadClaimEvent, deliverTickets } = require('../services/claim');
 const { sendDigest } = require('../services/digest');
 const { sendReminder } = require('../services/reminder');
+const { normalizeAlias, validateAlias, isAliasAvailable, saveMemberAlias } = require('../services/alias');
 
 const router = Router();
 
@@ -109,6 +110,27 @@ async function resolve(token) {
   return { status, guest, event: loaded.event, cfg: loaded.cfg };
 }
 
+// Live alias availability for the confirm page. Token-gated so it is not a
+// public enumeration surface; only answers on events with landing.ask_alias.
+router.get('/:token/alias-check', async (req, res) => {
+  try {
+    const r = await resolve(req.params.token);
+    if (r.status !== 'valid') return res.status(404).json({ error: 'invalid' });
+    if (!(r.cfg && r.cfg.landing && r.cfg.landing.ask_alias)) {
+      return res.status(404).json({ error: 'off' });
+    }
+    const alias = normalizeAlias(req.query.a);
+    if (!alias) return res.json({ available: false, error: 'Escribe un nombre.' });
+    const bad = validateAlias(alias);
+    if (bad) return res.json({ available: false, error: bad });
+    const available = await isAliasAvailable(alias);
+    res.json({ available, alias });
+  } catch (e) {
+    console.error('alias-check failed:', e.message);
+    res.status(500).json({ error: 'internal' });
+  }
+});
+
 router.get('/:token', async (req, res) => {
   try {
     const r = await resolve(req.params.token);
@@ -130,6 +152,21 @@ router.post('/:token', async (req, res) => {
   try {
     const r = await resolve(token);
     if (r.status === 'not_found') return res.status(404).json({ status: 'not_found' });
+
+    // Optional card alias. Validated and availability-checked BEFORE the burn
+    // so a taken name never costs the guest their one link. Only events with
+    // landing.ask_alias read the field; everything else ignores the body.
+    let alias = null;
+    if (r.cfg && r.cfg.landing && r.cfg.landing.ask_alias && req.body && req.body.alias != null) {
+      alias = normalizeAlias(req.body.alias);
+      if (alias) {
+        const bad = validateAlias(alias);
+        if (bad) return res.status(422).json({ status: 'bad_alias', error: bad });
+        if (!(await isAliasAvailable(alias))) {
+          return res.status(409).json({ status: 'alias_taken', error: 'Ese nombre ya fue tomado. Elige otro.' });
+        }
+      }
+    }
 
     // Atomic burn. Concurrent clicks (double-tap, duplicate tab) serialize on
     // an advisory lock inside the RPC, so exactly one of them gets 'claimed'
@@ -154,7 +191,28 @@ router.post('/:token', async (req, res) => {
         event: r.event,
         cfg: r.cfg,
       });
-      return res.json(publicView(r.event, r.cfg, 'claimed', { passes: sent.passes }));
+
+      // Alias save is best-effort: a lost race or a hiccup here must never
+      // undo a delivered claim. The page tells the guest either way.
+      let aliasSaved = false;
+      if (alias) {
+        try {
+          aliasSaved = await saveMemberAlias({ guestId: result.guest_id, alias });
+          if (aliasSaved) {
+            await supabase.from('guests')
+              .update({ notes: 'Alias: ' + alias })
+              .eq('id', result.guest_id);
+          }
+        } catch (e) {
+          console.error('alias save failed (claim already delivered):', e.message);
+        }
+      }
+
+      return res.json(publicView(r.event, r.cfg, 'claimed', {
+        passes: sent.passes,
+        alias_saved: aliasSaved,
+        alias: aliasSaved ? alias : null,
+      }));
     } catch (mailErr) {
       // The token is burned but the guest has nothing. Give it back so they
       // can retry rather than stranding them with a dead link.

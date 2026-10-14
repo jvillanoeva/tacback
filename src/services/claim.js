@@ -128,8 +128,24 @@ async function sendInvite({ guest, event, cfg }) {
  * a live token with no email is recoverable, the reverse is not.
  */
 async function sendInviteBulk({ guests, event, cfg, onProgress }) {
-  const withEmail = (guests || []).filter(g => g.email);
-  if (!withEmail.length) return { sent: 0, failed: 0, failures: [], minted: 0 };
+  let withEmail = (guests || []).filter(g => g.email);
+  if (!withEmail.length) return { sent: 0, failed: 0, failures: [], minted: 0, suppressed: 0 };
+
+  // Never mail a suppressed (unsubscribed) address. Looked up fresh on every
+  // send so a click minutes before a blast still counts.
+  const suppressedSet = new Set();
+  const emails = [...new Set(withEmail.map(g => g.email.trim().toLowerCase()))];
+  for (let i = 0; i < emails.length; i += 500) {
+    const { data, error } = await supabase
+      .from('email_suppressions')
+      .select('email')
+      .in('email', emails.slice(i, i + 500));
+    if (error) throw new Error('Suppression check failed: ' + error.message);
+    for (const r of data || []) suppressedSet.add(r.email.toLowerCase());
+  }
+  const suppressed = withEmail.filter(g => suppressedSet.has(g.email.trim().toLowerCase())).length;
+  withEmail = withEmail.filter(g => !suppressedSet.has(g.email.trim().toLowerCase()));
+  if (!withEmail.length) return { sent: 0, failed: 0, failures: [], minted: 0, suppressed };
 
   const ttlHours = Number(cfg.ttl_hours) > 0 ? Number(cfg.ttl_hours) : 24;
   const expiresAt = new Date(Date.now() + ttlHours * 3600 * 1000).toISOString();
@@ -157,7 +173,7 @@ async function sendInviteBulk({ guests, event, cfg, onProgress }) {
     await supabase.from('guests').update({ email_sent: true }).in('id', okIds.slice(i, i + 500));
   }
 
-  return { ...result, minted: mintedCount ?? minted.length, expires_at: expiresAt };
+  return { ...result, minted: mintedCount ?? minted.length, expires_at: expiresAt, suppressed };
 }
 
 /**

@@ -17,6 +17,7 @@ const loyaltyRouter = require('./routes/loyalty');
 const internalRouter = require('./routes/internal');
 const claimRouter = require('./routes/claim');
 const clientRouter = require('./routes/client');
+const unsubRouter = require('./routes/unsub');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -57,6 +58,7 @@ app.use('/api/loyalty', loyaltyRouter);
 app.use('/api/internal', internalRouter);
 app.use('/api/claim', claimRouter);   // public — guest-facing confirm link
 app.use('/api/client', clientRouter); // read-only client dashboard (allowlisted)
+app.use('/api/unsub', unsubRouter);   // public — unsubscribe link + RFC 8058 one-click
 
 // 404
 app.use((req, res) => {
