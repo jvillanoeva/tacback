@@ -27,14 +27,21 @@ function validateAlias(a) {
   return null;
 }
 
-async function isAliasAvailable(a) {
+/**
+ * Available = nobody has it, or the holder is the given email (your own
+ * clave is always "available" to you — a re-claim must never be told their
+ * name is taken by themselves).
+ */
+async function isAliasAvailable(a, forEmail) {
   const { data, error } = await supabase
     .from('loyalty_members')
-    .select('id')
+    .select('id, email')
     .ilike('alias', a)
     .limit(1);
   if (error) throw new Error('alias lookup failed: ' + error.message);
-  return !data || data.length === 0;
+  if (!data || data.length === 0) return true;
+  const holder = (data[0].email || '').trim().toLowerCase();
+  return !!forEmail && holder === String(forEmail).trim().toLowerCase();
 }
 
 /**

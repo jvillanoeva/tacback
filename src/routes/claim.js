@@ -92,7 +92,7 @@ async function resolve(token) {
 
   const { data: guest } = await supabase
     .from('guests')
-    .select('id, event_id, name, claim_expires_at, claimed_at')
+    .select('id, event_id, name, email, claim_expires_at, claimed_at')
     .eq('claim_token', token)
     .maybeSingle();
 
@@ -125,7 +125,7 @@ router.get('/:token/alias-check', async (req, res) => {
     if (!alias) return res.json({ available: false, error: 'Escribe un nombre.' });
     const bad = validateAlias(alias);
     if (bad) return res.json({ available: false, error: bad });
-    const available = await isAliasAvailable(alias);
+    const available = await isAliasAvailable(alias, r.guest && r.guest.email);
     res.json({ available, alias });
   } catch (e) {
     console.error('alias-check failed:', e.message);
@@ -164,7 +164,7 @@ router.post('/:token', async (req, res) => {
       if (alias) {
         const bad = validateAlias(alias);
         if (bad) return res.status(422).json({ status: 'bad_alias', error: bad });
-        if (!(await isAliasAvailable(alias))) {
+        if (!(await isAliasAvailable(alias, r.guest && r.guest.email))) {
           return res.status(409).json({ status: 'alias_taken', error: 'Ese nombre ya fue tomado. Elige otro.' });
         }
       }
