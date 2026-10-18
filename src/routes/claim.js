@@ -138,9 +138,20 @@ router.get('/:token', async (req, res) => {
     const r = await resolve(req.params.token);
     if (r.status === 'not_found') return res.status(404).json({ status: 'not_found' });
 
+    // A used link from a guest with a saved clave is a returning member, not
+    // an error — hand the page their clave so it can greet instead of reject.
+    let alias = null;
+    if (r.status === 'used' && r.guest.email) {
+      try {
+        const { memberAliasForEmail } = require('../services/alias');
+        alias = await memberAliasForEmail(r.guest.email);
+      } catch (e) { /* greeting only */ }
+    }
+
     res.json(publicView(r.event, r.cfg, r.status, {
       first_name: (r.guest.name || '').trim().split(/\s+/)[0] || null,
       expires_at: r.guest.claim_expires_at || null,
+      alias,
     }));
   } catch (e) {
     console.error('claim GET failed:', e.message);
