@@ -591,16 +591,25 @@ router.post('/send-claim-all', requireAuth, requireEventAccess(['owner', 'staff'
 
 // Claim-flow progress for the dashboard.
 router.get('/claim-status', requireAuth, requireEventAccess(['owner', 'staff', 'door']), async (req, res) => {
-  const { data, error } = await supabase
-    .from('guests')
-    .select('id, name, email, claim_sent_at, claim_expires_at, claimed_at, group_id')
-    .eq('event_id', req.event.id)
-    .not('email', 'is', null);
-
-  if (error) return res.status(500).json({ error: error.message });
+  // Page through — a single select caps at 1000 rows, which made these stats
+  // (and the send button's count) lie on lists bigger than that. Same
+  // pagination as send-claim-all.
+  const rows = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('guests')
+      .select('id, name, email, claim_sent_at, claim_expires_at, claimed_at, group_id')
+      .eq('event_id', req.event.id)
+      .not('email', 'is', null)
+      .order('created_at', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) return res.status(500).json({ error: error.message });
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE) break;
+  }
 
   const now = Date.now();
-  const rows = data || [];
   const stats = {
     total: rows.length,
     invited: rows.filter(g => g.claim_sent_at).length,
