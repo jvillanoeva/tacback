@@ -627,10 +627,17 @@ async function sendClaimInviteBatch(items, { onProgress } = {}) {
  * Mail 2 — the actual accesses. Renders one QR per pass (primary + group
  * extras), so "+1 acompañante" comes out as 2 QRs without special-casing.
  */
-async function sendClaimTicketsEmail({ guest, event, cfg, extraGuests = [] }) {
+async function sendClaimTicketsEmail({ guest, event, cfg, extraGuests = [], alias = null }) {
   if (!guest.email) throw new Error('Guest has no email address');
   const c = claimBrand(cfg);
   const t = (cfg && cfg.tickets) || {};
+
+  // Chosen clave, rendered big above the intro when the guest has one.
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const aliasRow = alias ? `
+        <tr><td align="center" style="padding:30px 28px 0;">
+          <div style="font-size:24px; font-weight:900; letter-spacing:3px; text-transform:uppercase; color:${c.ink};">${esc(alias)}</div>
+        </td></tr>` : '';
 
   const passes = [guest, ...extraGuests];
   const items = [];
@@ -654,8 +661,9 @@ async function sendClaimTicketsEmail({ guest, event, cfg, extraGuests = [] }) {
     .join('');
 
   const inner = `
+        ${aliasRow}
         ${t.intro_es ? `
-        <tr><td align="center" style="padding:30px 28px 0;">
+        <tr><td align="center" style="padding:${alias ? '14' : '30'}px 28px 0;">
           <div style="font-size:15px; line-height:1.6; font-weight:700; color:${c.ink};">${t.intro_es}</div>
         </td></tr>` : ''}
 

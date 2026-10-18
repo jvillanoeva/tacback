@@ -50,13 +50,18 @@ async function isAliasAvailable(a, forEmail) {
  * overwritten here. Returns true when the alias is now saved on the member,
  * false when it was lost to a race or the guest has no email.
  */
+/**
+ * Returns { saved, alias } where `alias` is the member's EFFECTIVE clave
+ * after this call: the one just saved, or the one they already had (first
+ * clave wins — a different name on a re-claim is reported, not overwritten).
+ */
 async function saveMemberAlias({ guestId, alias }) {
   const { data: guest } = await supabase
     .from('guests')
     .select('id, name, email')
     .eq('id', guestId)
     .single();
-  if (!guest || !guest.email) return false;
+  if (!guest || !guest.email) return { saved: false, alias: null };
   const email = guest.email.trim().toLowerCase();
 
   const { data: existing } = await supabase
@@ -67,7 +72,10 @@ async function saveMemberAlias({ guestId, alias }) {
 
   try {
     if (existing) {
-      if (existing.alias) return existing.alias.toLowerCase() === alias.toLowerCase();
+      if (existing.alias) {
+        const same = existing.alias.toLowerCase() === alias.toLowerCase();
+        return { saved: same, alias: existing.alias };
+      }
       const { error } = await supabase
         .from('loyalty_members')
         .update({ alias, updated_at: new Date().toISOString() })
@@ -81,10 +89,21 @@ async function saveMemberAlias({ guestId, alias }) {
     }
   } catch (e) {
     // 23505 = unique violation: someone took the alias between check and save.
-    if (e && (e.code === '23505' || /duplicate|unique/i.test(e.message || ''))) return false;
+    if (e && (e.code === '23505' || /duplicate|unique/i.test(e.message || ''))) return { saved: false, alias: null };
     throw e;
   }
-  return true;
+  return { saved: true, alias };
 }
 
-module.exports = { normalizeAlias, validateAlias, isAliasAvailable, saveMemberAlias, MAX_LEN };
+/** The saved clave for a guest's email, or null. */
+async function memberAliasForEmail(email) {
+  if (!email) return null;
+  const { data } = await supabase
+    .from('loyalty_members')
+    .select('alias')
+    .ilike('email', String(email).trim().toLowerCase())
+    .maybeSingle();
+  return (data && data.alias) || null;
+}
+
+module.exports = { normalizeAlias, validateAlias, isAliasAvailable, saveMemberAlias, memberAliasForEmail, MAX_LEN };

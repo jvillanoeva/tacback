@@ -180,7 +180,7 @@ async function sendInviteBulk({ guests, event, cfg, onProgress }) {
  * Mail 2. Loads the guest's group so "+1 acompañante" renders as 2 QRs.
  * Called only after claim_guest_access() has already burned the token.
  */
-async function deliverTickets({ guestId, event, cfg }) {
+async function deliverTickets({ guestId, event, cfg, alias = null }) {
   const { data: guest, error } = await supabase
     .from('guests')
     .select('*')
@@ -188,6 +188,15 @@ async function deliverTickets({ guestId, event, cfg }) {
     .single();
 
   if (error || !guest) throw new Error('Guest not found');
+
+  // Greet by the saved clave even when this claim didn't set one (field left
+  // empty on a re-claim). Best-effort.
+  if (!alias && guest.email) {
+    try {
+      const { memberAliasForEmail } = require('./alias');
+      alias = await memberAliasForEmail(guest.email);
+    } catch (e) { /* greeting only */ }
+  }
 
   let extraGuests = [];
   if (guest.group_id) {
@@ -200,7 +209,7 @@ async function deliverTickets({ guestId, event, cfg }) {
     extraGuests = extras || [];
   }
 
-  await sendClaimTicketsEmail({ guest, event, cfg, extraGuests });
+  await sendClaimTicketsEmail({ guest, event, cfg, extraGuests, alias });
   logActivity(event.id, guest.id, 'claim_tickets_sent');
 
   return { passes: 1 + extraGuests.length };

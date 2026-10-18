@@ -188,32 +188,38 @@ router.post('/:token', async (req, res) => {
     if (outcome === 'already_claimed') return res.status(409).json(publicView(r.event, r.cfg, 'used'));
 
     try {
+      // Save the clave BEFORE the QR mail so the mail can greet by it.
+      // Safe pre-delivery: a failed delivery releases the token, and the
+      // ownership-aware check lets the retry reclaim the same clave.
+      // Best-effort either way — a hiccup here never blocks the tickets.
+      let aliasSaved = false;
+      let effectiveAlias = null;
+      if (alias) {
+        try {
+          const saved = await saveMemberAlias({ guestId: result.guest_id, alias });
+          aliasSaved = saved.saved;
+          effectiveAlias = saved.alias;
+          if (aliasSaved && effectiveAlias) {
+            await supabase.from('guests')
+              .update({ notes: 'Alias: ' + effectiveAlias })
+              .eq('id', result.guest_id);
+          }
+        } catch (e) {
+          console.error('alias save failed:', e.message);
+        }
+      }
+
       const sent = await deliverTickets({
         guestId: result.guest_id,
         event: r.event,
         cfg: r.cfg,
+        alias: effectiveAlias,
       });
-
-      // Alias save is best-effort: a lost race or a hiccup here must never
-      // undo a delivered claim. The page tells the guest either way.
-      let aliasSaved = false;
-      if (alias) {
-        try {
-          aliasSaved = await saveMemberAlias({ guestId: result.guest_id, alias });
-          if (aliasSaved) {
-            await supabase.from('guests')
-              .update({ notes: 'Alias: ' + alias })
-              .eq('id', result.guest_id);
-          }
-        } catch (e) {
-          console.error('alias save failed (claim already delivered):', e.message);
-        }
-      }
 
       return res.json(publicView(r.event, r.cfg, 'claimed', {
         passes: sent.passes,
         alias_saved: aliasSaved,
-        alias: aliasSaved ? alias : null,
+        alias: effectiveAlias,
       }));
     } catch (mailErr) {
       // The token is burned but the guest has nothing. Give it back so they
