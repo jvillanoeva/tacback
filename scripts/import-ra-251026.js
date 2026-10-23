@@ -47,7 +47,7 @@ const NEW_EVENT_ID = '0f31a590-fae2-41a5-bebb-2a0f01e96ed3';
 const NEW_EVENT_SLUG = 'sunday-sunday-cdmx-25-10-26';
 const LAST_WEEK_EVENT_ID = 'af2cb113-d286-4f59-89e6-c6a1ba31e22a';
 const ORIGIN = 'ra-early-access';
-const DEFAULT_FILE = path.join(__dirname, 'data', 'attendees_rows.pre-2026-10-22.csv');
+const DEFAULT_FILE = path.join(__dirname, 'data', 'attendees_rows.csv');
 const BATCH = 500;
 const PAGE = 1000;
 

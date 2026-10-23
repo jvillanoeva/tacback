@@ -41,7 +41,10 @@ router.post('/blast/:secret', async (req, res) => {
     const event = (events || []).find(
       e => e.claim_flow && e.claim_flow.blast && e.claim_flow.blast.secret === req.params.secret
     );
-    if (!event) return res.status(404).json({ error: 'Not found' });
+    // Distinct from the app's generic 404 on purpose: a wrong-secret probe is
+    // how deploy checks prove this route is live without firing it (a 404
+    // body identical to "no such route" fooled the 18.10.26 deploy check).
+    if (!event) return res.status(403).json({ error: 'bad_blast_secret' });
     const cfg = event.claim_flow;
 
     if (cfg.blast.fired_at && req.body?.force !== true) {
