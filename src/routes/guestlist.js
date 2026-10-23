@@ -21,6 +21,17 @@ async function claimFlowActive(eventId) {
   return !!(data && data.claim_flow && data.claim_flow.enabled !== false);
 }
 
+/**
+ * Only claim-flow guests (RSVP tier, or already holding a confirm token) are
+ * held back by the guard. GA / null-tier guestlist rows on the same event get
+ * their QR directly — blocking them too is what locked the guestlist out all
+ * morning on 18.10.26 while the campaign ran.
+ */
+function isClaimFlowGuest(g) {
+  if (!g) return false;
+  return String(g.tier || '').trim().toUpperCase() === 'RSVP' || g.claim_token != null;
+}
+
 const CLAIM_GUARD_MSG =
   'Este evento usa el flujo de confirmación en dos pasos. Usa "Enviar invitaciones" ' +
   '(el QR se manda solo cuando el invitado confirma), no el envío directo de QR.';
@@ -177,9 +188,10 @@ router.post('/', requireAuth, requireEventAccess(['owner', 'staff']), async (req
   }
 
   // Send email with ALL QR codes (primary + extras).
-  // Suppressed on claim-flow events — the QRs only go out after the guest
-  // confirms, so mailing them here would bypass the mechanic.
-  const claimActive = await claimFlowActive(req.event.id);
+  // Suppressed for claim-flow guests — their QRs only go out after they
+  // confirm, so mailing them here would bypass the mechanic. Guestlist rows
+  // on the same event send normally.
+  const claimActive = isClaimFlowGuest(guest) && await claimFlowActive(req.event.id);
   if (send_email && guest.email && claimActive) {
     guest.claim_flow_notice = CLAIM_GUARD_MSG;
   } else if (send_email && guest.email) {
@@ -302,27 +314,26 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
 
   if (error) return res.status(500).json({ error: error.message });
 
-  // Direct-QR sending is meaningless on a claim-flow event — the codes are
-  // issued on confirmation, not at import. Report it instead of silently
-  // mailing 2000 people their QRs and skipping the mechanic.
+  // Direct-QR sending is meaningless for claim-flow guests — their codes are
+  // issued on confirmation, not at import. Skip those (and report it) instead
+  // of silently mailing 2000 people their QRs; guestlist rows still send.
+  let toSend = inserted;
+  let notice;
   if (send_emails && await claimFlowActive(req.event.id)) {
-    return res.status(201).json({
-      added: inserted.length,
-      emails_sent: 0,
-      notice: CLAIM_GUARD_MSG,
-    });
+    toSend = inserted.filter(g => !isClaimFlowGuest(g));
+    if (toSend.length < inserted.length) notice = CLAIM_GUARD_MSG;
   }
 
   // Send emails if requested — group extras with their primary
   let emailsSent = 0;
-  if (send_emails) {
+  if (send_emails && toSend.length) {
     const { data: event } = await supabase
       .from('events')
       .select('name, subtitle, date_label, time_label, venue, city, banner_url, logo_url, brand_color, promoter_name, email_instructions_es, email_instructions_en')
       .eq('id', req.event.id)
       .single();
 
-    for (const guest of inserted) {
+    for (const guest of toSend) {
       if (guest.email) {
         try {
           // Find extras in same group
@@ -346,6 +357,7 @@ router.post('/bulk', requireAuth, requireEventAccess(['owner', 'staff']), async 
   res.status(201).json({
     added: inserted.length,
     emails_sent: emailsSent,
+    ...(notice ? { notice } : {}),
   });
 });
 
@@ -429,7 +441,9 @@ router.post('/:guestId/send-qr', requireAuth, requireEventAccess(['owner', 'staf
 
   if (gErr || !guest) return res.status(404).json({ error: 'Guest not found' });
   if (!guest.email) return res.status(400).json({ error: 'Guest has no email address' });
-  if (await claimFlowActive(req.event.id)) return res.status(422).json({ error: CLAIM_GUARD_MSG });
+  if (isClaimFlowGuest(guest) && await claimFlowActive(req.event.id)) {
+    return res.status(422).json({ error: CLAIM_GUARD_MSG });
+  }
 
   const { data: event } = await supabase
     .from('events')
@@ -462,24 +476,37 @@ router.post('/:guestId/send-qr', requireAuth, requireEventAccess(['owner', 'staf
 
 // Send QR to all guests who haven't received it
 router.post('/send-all', requireAuth, requireEventAccess(['owner', 'staff']), async (req, res) => {
-  if (await claimFlowActive(req.event.id)) return res.status(422).json({ error: CLAIM_GUARD_MSG });
+  const claimActive = await claimFlowActive(req.event.id);
 
-  const { data: guests } = await supabase
+  let q = supabase
     .from('guests')
     .select('*')
     .eq('event_id', req.event.id)
     .eq('email_sent', false)
     .not('email', 'is', null);
+  // Claim-flow guests get mail 1 via "Enviar invitaciones", never a direct QR.
+  // Filtered in the query, not after: thousands of unsent RSVP rows would fill
+  // the 1000-row page and hide the guestlist rows behind them.
+  if (claimActive) q = q.is('claim_token', null).or('tier.is.null,tier.neq.RSVP');
+  const { data: fetched } = await q;
+  const guests = claimActive ? (fetched || []).filter(g => !isClaimFlowGuest(g)) : fetched;
 
   if (!guests || guests.length === 0) {
     return res.json({ sent: 0, message: 'All guests have already been sent their QR' });
   }
 
-  // Fetch all guests for group lookups
-  const { data: allEventGuests } = await supabase
-    .from('guests')
-    .select('*')
-    .eq('event_id', req.event.id);
+  // Group lookups, scoped to the groups being sent. A whole-event select caps
+  // at 1000 rows and would drop +N companions on a large campaign event.
+  const groupIds = [...new Set(guests.map(g => g.group_id).filter(Boolean))];
+  const allEventGuests = [];
+  for (let i = 0; i < groupIds.length; i += 200) {
+    const { data } = await supabase
+      .from('guests')
+      .select('*')
+      .eq('event_id', req.event.id)
+      .in('group_id', groupIds.slice(i, i + 200));
+    allEventGuests.push(...(data || []));
+  }
 
   const { data: event } = await supabase
     .from('events')

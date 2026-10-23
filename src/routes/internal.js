@@ -159,7 +159,8 @@ router.get('/events', requireServiceAuth, async (req, res) => {
  *
  * Returns 201 { ok, guest_id, email_sent, email_error } on insert.
  * Returns 409 if a guest with the same (event_id, email) already exists — the
- * caller treats this as "skipped".
+ * caller treats this as "skipped". Pass `allow_duplicate: true` to bypass that
+ * check and create an additional pass for an email that already has one.
  */
 router.post('/guests', requireServiceAuth, async (req, res) => {
   const body = req.body || {};
@@ -196,7 +197,15 @@ router.post('/guests', requireServiceAuth, async (req, res) => {
   const event_id = event.id;
 
   // Dedup by (event_id, email) — matches the caller's 409 = skip contract.
-  if (email) {
+  //
+  // Opt-out: `allow_duplicate: true` skips the check and creates another guest
+  // row for an email that already has one. A contact can legitimately hold
+  // several independent passes — a campaign RSVP in the morning and a +2 a
+  // promoter vouches for at night are different grants that happen to share an
+  // inbox. Treating the email as a unique key made those requests unfillable
+  // (18.10.26: every vouched guest already on the campaign list was rejected
+  // all night). Default stays ON so idempotent re-imports keep working.
+  if (email && body.allow_duplicate !== true) {
     const { data: existing } = await supabase
       .from('guests')
       .select('id')

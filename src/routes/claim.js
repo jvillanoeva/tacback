@@ -1,6 +1,6 @@
 const { Router } = require('express');
 const { supabase } = require('../lib/supabase');
-const { loadClaimEvent, deliverTickets } = require('../services/claim');
+const { loadClaimEvent, deliverTickets, sendInviteBulk } = require('../services/claim');
 const { sendDigest } = require('../services/digest');
 const { sendReminder } = require('../services/reminder');
 const { normalizeAlias, validateAlias, isAliasAvailable, saveMemberAlias } = require('../services/alias');
@@ -16,6 +16,83 @@ const router = Router();
  * and can't be influenced by the caller, and sends are rate-limited, so the
  * worst a leaked URL buys is a duplicate mail to a fixed set of addresses.
  */
+/**
+ * Scheduled campaign blast — mail 1 to every guest not yet invited.
+ *
+ * Same auth shape as the digest and reminder below: two path segments, the
+ * unguessable secret (claim_flow.blast.secret) IS the credential, and the
+ * recipient set is built server-side, so a leaked URL can at worst re-run a
+ * send that the fired_at guard already refuses.
+ *
+ *   - blast.fired_at is stamped BEFORE any mail goes out and a second call
+ *     409s unless {"force": true} — a scheduler that double-fires can't
+ *     double-mail 1,800 people.
+ *   - Suppressed (unsubscribed) addresses are filtered inside
+ *     sendInviteBulk like every other send.
+ */
+router.post('/blast/:secret', async (req, res) => {
+  try {
+    const { data: events, error } = await supabase
+      .from('events')
+      .select('*')
+      .not('claim_flow', 'is', null);
+    if (error) return res.status(500).json({ error: error.message });
+
+    const event = (events || []).find(
+      e => e.claim_flow && e.claim_flow.blast && e.claim_flow.blast.secret === req.params.secret
+    );
+    if (!event) return res.status(404).json({ error: 'Not found' });
+    const cfg = event.claim_flow;
+
+    if (cfg.blast.fired_at && req.body?.force !== true) {
+      return res.status(409).json({ error: 'Blast already fired at ' + cfg.blast.fired_at });
+    }
+
+    // Eligible = RSVP tier, has email, never invited, never claimed. Paginated.
+    // RSVP only: guestlist (GA) rows on the same event already hold a direct
+    // QR and must never get the early-access invite.
+    const guests = [];
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error: qErr } = await supabase
+        .from('guests')
+        .select('id, name, email, group_id')
+        .eq('event_id', event.id)
+        .eq('tier', 'RSVP')
+        .not('email', 'is', null)
+        .is('claimed_at', null)
+        .is('claim_sent_at', null)
+        .order('created_at', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (qErr) return res.status(500).json({ error: qErr.message });
+      guests.push(...(data || []));
+      if (!data || data.length < PAGE) break;
+    }
+
+    // Stamp BEFORE sending so a crash can't be blind-re-fired into doubles.
+    await supabase.from('events')
+      .update({ claim_flow: { ...cfg, blast: { ...cfg.blast, fired_at: new Date().toISOString(), targets: guests.length } } })
+      .eq('id', event.id);
+
+    if (!guests.length) return res.json({ sent: 0, failed: 0, total: 0, message: 'nothing eligible' });
+
+    const result = await sendInviteBulk({ guests, event, cfg });
+    console.log('[blast]', event.slug, 'sent:', result.sent, 'failed:', result.failed, 'suppressed:', result.suppressed);
+    res.json({
+      sent: result.sent,
+      failed: result.failed,
+      suppressed: result.suppressed || 0,
+      total: guests.length,
+      expires_at: result.expires_at,
+      aborted: result.aborted || null,
+      failures: (result.failures || []).slice(0, 25),
+    });
+  } catch (e) {
+    console.error('blast failed:', e.message);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 router.post('/digest/:secret', async (req, res) => {
   try {
     const r = await sendDigest(req.params.secret);
@@ -197,6 +274,14 @@ router.post('/:token', async (req, res) => {
     if (outcome === 'not_found') return res.status(404).json({ status: 'not_found' });
     if (outcome === 'expired') return res.status(410).json(publicView(r.event, r.cfg, 'expired'));
     if (outcome === 'already_claimed') return res.status(409).json(publicView(r.event, r.cfg, 'used'));
+    // claim_flow.cap reached — checked inside the RPC, token NOT burned.
+    if (outcome === 'cap_reached') {
+      return res.status(409).json(publicView(r.event, r.cfg, 'cap_reached', { error: 'cap_reached' }));
+    }
+    if (outcome !== 'claimed') {
+      console.error('claim_guest_access unexpected outcome:', outcome);
+      return res.status(500).json({ status: 'error', error: 'Internal error' });
+    }
 
     try {
       // Save the clave BEFORE the QR mail so the mail can greet by it.
